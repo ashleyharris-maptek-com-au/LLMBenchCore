@@ -13,7 +13,7 @@ import argparse
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from filelock import FileLock
-from CacheLayer import CacheLayer as cl
+from .CacheLayer import CacheLayer as cl
 
 global UNSKIP
 UNSKIP = False
@@ -467,7 +467,7 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
 
   # Handle global flags
   if args.ignore_cached_failures:
-    import CacheLayer
+    from . import CacheLayer
     CacheLayer.IGNORE_CACHED_FAILURES = True
     IGNORE_CACHED_FAILURES = True
     print(
@@ -475,13 +475,13 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
     )
 
   if args.force:
-    import CacheLayer
+    from . import CacheLayer
     CacheLayer.FORCE_REFRESH = True
     FORCE_ARG = True
     print("Force mode: AI response cache will be bypassed (new responses still cached)")
 
   if args.offline:
-    import CacheLayer
+    from . import CacheLayer
     CacheLayer.OFFLINE_MODE = True
     print("Offline mode: No API calls will be made, cache only.")
 
