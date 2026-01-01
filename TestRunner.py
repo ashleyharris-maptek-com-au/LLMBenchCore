@@ -1739,36 +1739,36 @@ def run_model_config(config: dict, test_filter: Optional[Set[int]] = None):
     return
 
   if engine_type == "placebo":
-    from AiEnginePlacebo import PlaceboEngine
+    from .AiEnginePlacebo import PlaceboEngine
     engine = PlaceboEngine()
     runAllTests(engine.AIHook, name, test_filter)
 
   elif engine_type == "openai":
-    from AiEngineOpenAiChatGPT import OpenAIEngine
+    from .AiEngineOpenAiChatGPT import OpenAIEngine
     engine = OpenAIEngine(config["base_model"], config["reasoning"], config["tools"])
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
   elif engine_type == "gemini":
-    from AiEngineGoogleGemini import GeminiEngine
+    from .AiEngineGoogleGemini import GeminiEngine
     engine = GeminiEngine(config["base_model"], config["reasoning"], config["tools"])
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
   elif engine_type == "xai":
-    from AiEngineXAIGrok import GrokEngine
+    from .AiEngineXAIGrok import GrokEngine
     engine = GrokEngine(config["base_model"], config["reasoning"], config["tools"])
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
   elif engine_type == "anthropic":
-    from AiEngineAnthropicClaude import ClaudeEngine
+    from .AiEngineAnthropicClaude import ClaudeEngine
     engine = ClaudeEngine(config["base_model"], config["reasoning"], config["tools"])
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
   elif engine_type == "bedrock":
-    from AiEngineAmazonBedrock import BedrockEngine
+    from .AiEngineAmazonBedrock import BedrockEngine
     engine = BedrockEngine(config["base_model"], config["reasoning"], config["tools"],
                            config.get("region", "us-east-1"))
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
