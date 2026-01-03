@@ -819,9 +819,17 @@ def runTest(index: int, aiEngineHook: callable, aiEngineName: str) -> Dict[str, 
       print(f"No answer generated for subpass {subPass}")
       subpass_data["score"] = 0
     elif "resultToImage" in g:
-      score, explanation = g["gradeAnswer"](result, subPass, aiEngineName)
+      niceResult = None
+      gaResult = g["gradeAnswer"](result, subPass, aiEngineName)
+      if len(gaResult) == 2:
+        score, explanation = gaResult
+      else:
+        score, explanation, niceResult = gaResult
+
       output_path = g["resultToImage"](result, subPass, aiEngineName)
-      if "resultToNiceReport" in g:
+      if niceResult is not None:
+        subpass_data["output_nice"] = niceResult
+      elif "resultToNiceReport" in g:
         subpass_data["output_nice"] = g["resultToNiceReport"](result, subPass, aiEngineName)
       else:
         subpass_data["output_text"] = result
@@ -850,17 +858,26 @@ def runTest(index: int, aiEngineHook: callable, aiEngineName: str) -> Dict[str, 
       # Some tests require a custom grading function.
 
       try:
-        score, explanation = g["gradeAnswer"](result, subPass, aiEngineName)
+        gaResult = g["gradeAnswer"](result, subPass, aiEngineName)
       except Exception as e:
         print("Failed to grade subpass " + str(subPass) + " - " + str(e))
         score = 10000  # This should get attention!
         explanation = "Failed to grade subpass " + str(subPass) + " - " + str(e) + \
             "This is a framework error, not an AI error."
+        gaResult = (score, explanation)
+
+      niceResult = None
+      if len(gaResult) == 2:
+        score, explanation = gaResult
+      else:
+        score, explanation, niceResult = gaResult
 
       subpass_data["score"] = score
       subpass_data["scoreExplanation"] = explanation
 
-      if "resultToNiceReport" in g:
+      if niceResult is not None:
+        subpass_data["output_nice"] = niceResult
+      elif "resultToNiceReport" in g:
         try:
           subpass_data["output_nice"] = g["resultToNiceReport"](result, subPass, aiEngineName)
         except Exception as e:
@@ -961,9 +978,14 @@ def runTest(index: int, aiEngineHook: callable, aiEngineName: str) -> Dict[str, 
       print(f"Running extra subpass {subPass} for grading with engine {aiEngineName}")
       subpass_data = {}
       start = time.time()
-      score, explanation = g["gradeAnswer"](results[0], subPass, aiEngineName)
+      gaResult = g["gradeAnswer"](results[0], subPass, aiEngineName)
       execution_time = time.time() - start
       if execution_time > 1: print(f"Grade Answer {subPass} took {execution_time:.2f}s")
+      niceResult = None
+      if len(gaResult) == 2:
+        score, explanation = gaResult
+      else:
+        score, explanation, niceResult = gaResult
 
       if score <= 0:
         gotAZero = True
@@ -971,10 +993,14 @@ def runTest(index: int, aiEngineHook: callable, aiEngineName: str) -> Dict[str, 
       subpass_data["score"] = score
       subpass_data["subpass"] = subPass
       subpass_data["scoreExplanation"] = explanation
-      report_start = time.time()
-      subpass_data["output_nice"] = g["resultToNiceReport"](results[0], subPass, aiEngineName)
-      report_time = time.time() - report_start
-      if report_time > 1: print(f"Result to nice report {subPass} took {report_time:.2f}s")
+
+      if niceResult is not None:
+        subpass_data["output_nice"] = niceResult
+      else:
+        report_start = time.time()
+        subpass_data["output_nice"] = g["resultToNiceReport"](results[0], subPass, aiEngineName)
+        report_time = time.time() - report_start
+        if report_time > 1: print(f"Result to nice report {subPass} took {report_time:.2f}s")
       subpass_results.append(subpass_data)
       print()
   return {
