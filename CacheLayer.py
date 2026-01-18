@@ -30,6 +30,9 @@ class CacheLayer:
     self.engineName = engineName
     self.temp_dir = tempfile.gettempdir()
     self.failCount = 0
+    # Capture force_refresh at construction time via sys.modules to get the module, not the class
+    import sys
+    self.force_refresh = sys.modules[__name__].FORCE_REFRESH
 
   def AIHook(self, prompt: str, structure, index, subPass):
     # Check if this prompt is permanently blocked due to content violation
@@ -71,11 +74,12 @@ class CacheLayer:
       else:
         return "", "AI service has failed 9 times, assumed dead."
 
-    if not FORCE_REFRESH and os.path.exists(cache_file):
+    if not self.force_refresh and os.path.exists(cache_file):
       try:
         with open(cache_file, "r", encoding="utf-8") as f:
           cachedJson = json.load(f)
-        if len(str(cachedJson)) <= 6 and IGNORE_CACHED_FAILURES:
+          print("Using cached response from " + cache_file)
+        if len(str(cachedJson)) <= 10 and IGNORE_CACHED_FAILURES:
           print(f"IGNORE_CACHED_FAILURES set, cached result was too short: '{cachedJson}'")
           cachedJson = ""
           try:

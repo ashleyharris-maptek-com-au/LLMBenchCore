@@ -18,6 +18,8 @@ Responses API reference: https://platform.openai.com/docs/api-reference/response
 import hashlib
 import os
 import json
+import random
+import time
 from . import PromptImageTagging as pit
 
 
@@ -105,6 +107,10 @@ def _openai_ai_hook(prompt: str, structure: dict | None, model: str, reasoning, 
 
     response_params = {"model": model_to_use, "input": input_value, "service_tier": "flex"}
 
+    if "5.2-pro" in model_to_use:
+      # Flex isn't supported by 5.2-pro
+      del response_params["service_tier"]
+
     # Add reasoning effort
     if isinstance(reasoning, int) and reasoning > 0:
       # Map 1-10 scale to low/medium/high
@@ -112,7 +118,7 @@ def _openai_ai_hook(prompt: str, structure: dict | None, model: str, reasoning, 
         response_params["reasoning"] = {"effort": "low"}
       elif reasoning <= 7:
         response_params["reasoning"] = {"effort": "medium"}
-      elif reasoning == 10 and model_to_use == "gpt-5.2":
+      elif reasoning == 10 and "gpt-5.2" in model_to_use:
         response_params["reasoning"] = {"effort": "xhigh"}
       else:
         response_params["reasoning"] = {"effort": "high"}
@@ -134,14 +140,12 @@ def _openai_ai_hook(prompt: str, structure: dict | None, model: str, reasoning, 
     if tools is True:
       # Enable built-in hosted tools
       # Note: file_search requires a vector_store, so it's excluded
-      response_params["tools"] = [{
-        "type": "web_search"
-      }, {
-        "type": "code_interpreter",
-        "container": {
-          "type": "auto"
-        }
-      }]
+      response_params["tools"] = [{"type": "web_search"}]
+
+      # 5.2 pro doesn't support code execution.
+      if "5.2-pro" not in model_to_use:
+        response_params["tools"].append({"type": "code_interpreter", "container": {"type": "auto"}})
+
     elif tools and tools is not False:
       # Convert function list to OpenAI tool format if needed
       tools_list = []
@@ -256,8 +260,13 @@ def _openai_ai_hook(prompt: str, structure: dict | None, model: str, reasoning, 
       else:
         return "__content_violation__", f"Content violation: {e}"
 
+    if "You exceeded your current quota," in str(e):
+      print("QUOTA EXCEEDED. Waiting 15 minutes to an hour.")
+      time.sleep(random.randint(900, 3600))
+      return "", ""
+
     # Return appropriate empty response based on structure
     if structure is not None:
-      return {}
+      return {}, ""
     else:
-      return ""
+      return "", ""

@@ -17,6 +17,8 @@ The SDK documentation can be found at: https://docs.x.ai/
 import hashlib
 import os
 import json
+import random
+import time
 from . import PromptImageTagging as pit
 from typing import Any, List, Optional
 from pydantic import BaseModel, create_model
@@ -99,6 +101,9 @@ def json_schema_to_pydantic(schema: dict, name: str = "DynamicModel") -> type[Ba
 
 def _build_xai_user_args(prompt: str, structure: dict | None) -> list[Any]:
   from xai_sdk.chat import image
+  from PIL import Image
+  import io
+  import base64
 
   prompt_parts = pit.parse_prompt_parts(prompt)
   user_args: list[Any] = []
@@ -113,9 +118,30 @@ def _build_xai_user_args(prompt: str, structure: dict | None) -> list[Any]:
         # Keep full data URI format - xAI SDK requires it
         user_args.append(image(part_value))
       else:
-        # Convert local file to data URI format
+        # Convert local file to data URI format, resizing if needed
         local_path = pit.resolve_local_path(part_value)
-        data_uri = pit.file_to_data_uri(local_path)
+        # Resize if over 8000 pixels on any side (xAI has stricter limits)
+        img = Image.open(local_path)
+        max_dim = 8000
+        if img.width > max_dim or img.height > max_dim:
+          scale = min(max_dim / img.width, max_dim / img.height)
+          new_size = (int(img.width * scale), int(img.height * scale))
+          print(
+            f"Resizing image from {img.width}x{img.height} to {new_size[0]}x{new_size[1]} for xAI")
+          img = img.resize(new_size, Image.LANCZOS)
+          # Convert to base64
+          buffer = io.BytesIO()
+          fmt = img.format or 'PNG'
+          if fmt.upper() == 'JPEG':
+            img.save(buffer, format='JPEG', quality=90)
+            mime_type = 'image/jpeg'
+          else:
+            img.save(buffer, format='PNG')
+            mime_type = 'image/png'
+          b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+          data_uri = f"data:{mime_type};base64,{b64}"
+        else:
+          data_uri = pit.file_to_data_uri(local_path)
         user_args.append(image(data_uri))
 
   if structure is not None:
@@ -179,14 +205,16 @@ def _grok_ai_hook(prompt: str, structure: dict | None, model: str, reasoning, to
         pydantic_model = None
 
     # Add tools if specified
+    # xAI SDK uses tool objects from xai_sdk.tools
     if tools is True:
-      chat_params["tools"] = [{
-        "type": "web_search"
-      }, {
-        "type": "x_search"
-      }, {
-        "type": "code_execution"
-      }]
+      from xai_sdk.tools import code_execution as xai_code_execution
+      from xai_sdk.tools import web_search as xai_web_search
+      from xai_sdk.tools import x_search as xai_x_search
+      chat_params["tools"] = [
+        xai_web_search(),
+        xai_x_search(),
+        xai_code_execution(),
+      ]
     elif tools and tools is not False:
       if isinstance(tools, list):
         chat_params["tools"] = tools
@@ -253,6 +281,7 @@ def _grok_ai_hook(prompt: str, structure: dict | None, model: str, reasoning, to
         return result_dict, chainOfThought
       except Exception as e:
         print(f"Structured parse failed: {e}")
+        print("Model returned:\n" + output_text)
         return {}, ""
     else:
       # Non-structured output - just return the text
@@ -269,5 +298,10 @@ def _grok_ai_hook(prompt: str, structure: dict | None, model: str, reasoning, to
         return {"__content_violation__": True, "reason": str(e)}, f"Content violation: {e}"
       else:
         return "__content_violation__", f"Content violation: {e}"
+
+    if "rate limit" in str(e) or "StatusCode.DEADLINE_EXCEEDED" in str(
+        e) or "StatusCode.DEADLINE_EXCEEDED" in str(e):
+      print("Hit rate limit - pausing for a random time between 5 and 30 minutes.")
+      time.sleep(random.randint(300, 1800))
 
     return None

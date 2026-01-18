@@ -17,6 +17,7 @@ The SDK documentation can be found at: https://googleapis.github.io/python-genai
 import hashlib
 import os
 import json
+import random
 from . import PromptImageTagging as pit
 import time
 import threading
@@ -27,7 +28,7 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, create_model
 
-TIMEOUT_SECONDS = 3600  # 1 hour timeout
+TIMEOUT_SECONDS = 3600 * 3  # 3 hour timeout
 
 
 class GeminiEngine:
@@ -214,6 +215,9 @@ def _gemini_ai_hook(prompt: str, structure: dict | None, model: str, reasoning,
 
       config_params['thinking_config'] = types.ThinkingConfig(thinking_budget=thinking_budget)
 
+    # Track if we need a two-pass approach (tools + structured output)
+    needs_two_pass = tools and tools is not False and structure is not None
+
     # Add tools if specified (supports built-in and custom tools)
     if tools and tools is not False:
       tools_list = []
@@ -275,14 +279,14 @@ def _gemini_ai_hook(prompt: str, structure: dict | None, model: str, reasoning,
           image_bytes = pit.read_file_bytes(local_path)
           contents.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
 
-    if structure is not None and tools:
+    if needs_two_pass:
+      # For two-pass approach, ask model to provide detailed text answer
       schema_json = json.dumps(structure, indent=2)
-      contents.append(f"""
-
-You MUST respond with valid JSON that matches this exact schema:
+      contents.append(
+        f"""\n\nProvide your answer with all relevant details. Your response will be parsed into this JSON structure:
 {schema_json}
 
-Return ONLY the JSON object, no markdown formatting, no code blocks, no explanation.""")
+Make sure to include all the information needed to populate these fields.""")
 
     if not contents:
       contents = [""]
@@ -331,6 +335,11 @@ Return ONLY the JSON object, no markdown formatting, no code blocks, no explanat
         break
       elif msg_type == "error":
         print(f"Stream error: {payload}")
+
+        if "RESOURCE_EXHAUSTED" in payload or "exceeded your current quota" in payload:
+          print(
+            "Pausing for a random period of time to help sooth quota issues (15 minutes - 1 hour)")
+          time.sleep(random.randint(900, 3600))
         break
       elif msg_type == "chunk":
         chunk = payload
@@ -341,7 +350,7 @@ Return ONLY the JSON object, no markdown formatting, no code blocks, no explanat
               # Check if this is a thinking part
               if hasattr(part, 'thought') and part.thought:
                 # This is thinking content
-                thought_text = part.text if hasattr(part, 'text') else ""
+                thought_text = part.text if hasattr(part, 'text') and part.text else ""
                 current_thinking_line += thought_text
                 # Print complete lines as they arrive
                 while "\n" in current_thinking_line:
@@ -351,6 +360,14 @@ Return ONLY the JSON object, no markdown formatting, no code blocks, no explanat
               elif hasattr(part, 'text') and part.text:
                 # This is regular output content
                 output_text += part.text
+              elif hasattr(part, 'executable_code') and part.executable_code:
+                # Gemini is running code:
+                print("Executing the following code:")
+                print("\n> " + "\n> ".join(part.executable_code.code.split("\n")))
+              elif hasattr(part, 'code_execution_result') and part.code_execution_result:
+                # Gemini is running code:
+                print("Code execution returned:")
+                print("\n< " + "\n< ".join(part.code_execution_result.output.split("\n")))
 
     # Flush any remaining thinking content
     if current_thinking_line:
@@ -365,6 +382,45 @@ Return ONLY the JSON object, no markdown formatting, no code blocks, no explanat
 
     # Parse and return response
     if structure is not None:
+      # Two-pass approach: use a second call to convert text to structured output
+      if needs_two_pass and output_text:
+        print(f"Two-pass: Converting text response to structured output...")
+        print(output_text)
+        try:
+          # Second pass: use structured output to parse the text answer
+          def remove_additional_properties(schema):
+            if isinstance(schema, dict):
+              schema.pop("additionalProperties", None)
+              for key, value in schema.items():
+                if isinstance(value, dict):
+                  remove_additional_properties(value)
+                elif isinstance(value, list) and value and isinstance(value[0], dict):
+                  for item in value:
+                    if isinstance(item, dict):
+                      remove_additional_properties(item)
+            return schema
+
+          cleaned_structure = remove_additional_properties(structure.copy())
+          parse_config = types.GenerateContentConfig(response_mime_type='application/json',
+                                                     response_schema=cleaned_structure)
+          parse_prompt = f"""Extract the answer from the following text and return it as JSON.
+
+Text to parse:
+{output_text}
+
+Return ONLY the JSON object matching the schema."""
+
+          parse_response = client.models.generate_content(model=model,
+                                                          contents=[parse_prompt],
+                                                          config=parse_config)
+
+          if parse_response.text:
+            parsed = json.loads(parse_response.text)
+            return parsed, chainOfThought
+        except Exception as e:
+          print(f"Warning: Two-pass structured output failed: {e}")
+          # Fall through to try direct text parsing
+
       if output_text:
         # Try to extract JSON from output (model may wrap it in markdown)
         json_text = output_text.strip()
@@ -384,14 +440,16 @@ Return ONLY the JSON object, no markdown formatting, no code blocks, no explanat
               parsed_obj = pydantic_model.model_validate_json(json_text)
               return parsed_obj.model_dump(), chainOfThought
             except Exception as e:
-              return {}, chainOfThought
+              print(f"Warning: Failed to parse JSON response: {e}")
+              print(f"Raw output was: {output_text[:500]}")
+              return {}, chainOfThought + "\n\nFailed to parse JSON.\n" + output_text
           else:
             parsed = json.loads(json_text)
             return parsed, chainOfThought
         except json.JSONDecodeError as e:
           print(f"Warning: Failed to parse JSON response: {e}")
           print(f"Raw output was: {output_text[:500]}")
-          return {}, chainOfThought
+          return {}, chainOfThought + "\n\nDid not output valid JSON.\n" + output_text
       return {}, chainOfThought
     else:
       return output_text or "", chainOfThought
