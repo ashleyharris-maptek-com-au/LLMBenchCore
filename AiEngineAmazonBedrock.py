@@ -107,8 +107,12 @@ def json_schema_to_pydantic(schema: dict, name: str = "DynamicModel") -> type[Ba
 
 def build_bedrock_content(prompt: str) -> list[dict]:
   """Build Bedrock Converse API content blocks from prompt with image tags."""
+  from PIL import Image
+  import io
+
   prompt_parts = pit.parse_prompt_parts(prompt)
   content_blocks: list[dict] = []
+  max_dim = 16000  # Bedrock limit
 
   for part_type, part_value in prompt_parts:
     if part_type == "text":
@@ -145,11 +149,29 @@ def build_bedrock_content(prompt: str) -> list[dict]:
           img_format = "jpeg"
         content_blocks.append({"image": {"format": img_format, "source": {"bytes": image_bytes}}})
       else:
-        # Local file path
+        # Local file path - resize if needed
         local_path = pit.resolve_local_path(part_value)
-        image_bytes = pit.read_file_bytes(local_path)
+        img = Image.open(local_path)
         ext = os.path.splitext(local_path)[1].lower().lstrip(".")
         img_format = "jpeg" if ext in ["jpg", "jpeg"] else ext
+
+        if img.width > max_dim or img.height > max_dim:
+          scale = min(max_dim / img.width, max_dim / img.height)
+          new_size = (int(img.width * scale), int(img.height * scale))
+          print(
+            f"Resizing image from {img.width}x{img.height} to {new_size[0]}x{new_size[1]} for Bedrock"
+          )
+          img = img.resize(new_size, Image.LANCZOS)
+          buffer = io.BytesIO()
+          if img_format == "jpeg":
+            img.save(buffer, format='JPEG', quality=90)
+          else:
+            img.save(buffer, format='PNG')
+            img_format = "png"
+          image_bytes = buffer.getvalue()
+        else:
+          image_bytes = pit.read_file_bytes(local_path)
+
         content_blocks.append({"image": {"format": img_format, "source": {"bytes": image_bytes}}})
 
   if not content_blocks:

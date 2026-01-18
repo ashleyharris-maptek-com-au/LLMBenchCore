@@ -14,7 +14,8 @@ Get your API key from: https://console.anthropic.com/
 The SDK documentation can be found at: https://github.com/anthropics/anthropic-sdk-python
 """
 
-import os, json, hashlib
+import os, json, hashlib, io, base64
+from PIL import Image
 from . import PromptImageTagging as pit
 
 
@@ -70,7 +71,24 @@ def _build_anthropic_message_content(prompt: str) -> list[dict]:
         })
       else:
         local_path = pit.resolve_local_path(part_value)
-        mime_type, b64 = pit.file_to_base64(local_path)
+        # Resize if over 8000 pixels on any side
+        img = Image.open(local_path)
+        max_dim = 7999
+        if img.width > max_dim or img.height > max_dim:
+          scale = min(max_dim / img.width, max_dim / img.height)
+          new_size = (int(img.width * scale), int(img.height * scale))
+          print("Resizing image from", img.width, "x", img.height, "to", new_size)
+          img = img.resize(new_size, Image.LANCZOS)
+        # Convert to base64
+        buffer = io.BytesIO()
+        fmt = img.format or 'PNG'
+        if fmt.upper() == 'JPEG':
+          img.save(buffer, format='JPEG', quality=90)
+          mime_type = 'image/jpeg'
+        else:
+          img.save(buffer, format='PNG')
+          mime_type = 'image/png'
+        b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
         content_blocks.append({
           "type": "image",
           "source": {

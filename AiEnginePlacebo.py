@@ -1,11 +1,13 @@
 import hashlib
-from typing import Optional, Union, Callable
+from typing import Optional, Union, Callable, Tuple
 
 # Placebo data provider - must be set by consuming benchmark
-_placebo_data_provider: Optional[Callable[[int, int], Optional[Union[dict, str]]]] = None
+_placebo_data_provider: Optional[Callable[[int, int], Tuple[Optional[Union[dict, str]],
+                                                            str]]] = None
 
 
-def set_placebo_data_provider(provider: Callable[[int, int], Optional[Union[dict, str]]]) -> None:
+def set_placebo_data_provider(
+    provider: Callable[[int, int], Tuple[Optional[Union[dict, str]], str]]) -> None:
   """
   Set the placebo data provider function.
   
@@ -34,13 +36,15 @@ class PlaceboEngine:
   def __init__(self):
     self.configAndSettingsHash = hashlib.sha256(b"Placebo").hexdigest()
 
-  def AIHook(self, prompt: str, structure: Optional[dict], questionNum: int,
-             subPass: int) -> Union[dict, str, None]:
+  def AIHook(self, prompt: str, structure: Optional[dict], questionNum: int, subPass: int):
     """Dispatch to the appropriate question module for placebo responses."""
     if _placebo_data_provider is not None:
-      result = _placebo_data_provider(questionNum, subPass)
+      result, reasoning = _placebo_data_provider(questionNum, subPass)
       if result is not None:
-        return result
+        return result, reasoning
+
+      # No response found for this question/subpass
+      return "", reasoning
 
     # No response found for this question/subpass
-    return None
+    return "", ""

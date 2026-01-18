@@ -186,7 +186,7 @@ def get_default_model_configs() -> List[Dict[str, Any]]:
   })
 
   # OpenAI models
-  openai_base_models = ["gpt-5-nano", "gpt-5-mini", "gpt-5.1", "gpt-5.2"]
+  openai_base_models = ["gpt-5-nano", "gpt-5-mini", "gpt-5.1", "gpt-5.2", "gpt-5.2-pro"]
   for model in openai_base_models:
     configs.append({
       "name": model,
@@ -204,14 +204,16 @@ def get_default_model_configs() -> List[Dict[str, Any]]:
       "tools": False,
       "env_key": "OPENAI_API_KEY"
     })
-    configs.append({
-      "name": f"{model}-Reasoning-Tools",
-      "engine": "openai",
-      "base_model": model,
-      "reasoning": 10,
-      "tools": True,
-      "env_key": "OPENAI_API_KEY"
-    })
+
+    if "5.2-pro" not in model:
+      configs.append({
+        "name": f"{model}-Reasoning-Tools",
+        "engine": "openai",
+        "base_model": model,
+        "reasoning": 10,
+        "tools": True,
+        "env_key": "OPENAI_API_KEY"
+      })
 
   # Gemini models
   gemini_base_models = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-3-pro-preview"]
@@ -282,6 +284,14 @@ def get_default_model_configs() -> List[Dict[str, Any]]:
     "tools": False,
     "env_key": "XAI_API_KEY"
   })
+  configs.append({
+    "name": "grok-4-0709-Reasoning-Tools",
+    "engine": "xai",
+    "base_model": "grok-4-0709",
+    "reasoning": 10,
+    "tools": True,
+    "env_key": "XAI_API_KEY"
+  })
 
   # Anthropic models
   anthropic_base_models = ["claude-sonnet-4-5", "claude-opus-4-5"]
@@ -326,6 +336,24 @@ def get_default_model_configs() -> List[Dict[str, Any]]:
       "region": "us-east-1",
       "env_key": "AWS_ACCESS_KEY_ID"
     })
+    configs.append({
+      "name": name + "-HighReasoning",
+      "engine": "bedrock",
+      "base_model": model_id,
+      "reasoning": 10,
+      "tools": False,
+      "region": "us-east-1",
+      "env_key": "AWS_ACCESS_KEY_ID"
+    })
+    configs.append({
+      "name": name + "-Reasoning-Tools",
+      "engine": "bedrock",
+      "base_model": model_id,
+      "reasoning": 10,
+      "tools": True,
+      "region": "us-east-1",
+      "env_key": "AWS_ACCESS_KEY_ID"
+    })
 
   # Amazon Bedrock - Llama models
   bedrock_llama_models = [
@@ -342,11 +370,29 @@ def get_default_model_configs() -> List[Dict[str, Any]]:
       "region": "us-west-2",
       "env_key": "AWS_ACCESS_KEY_ID"
     })
+    configs.append({
+      "name": name + "-HighReasoning",
+      "engine": "bedrock",
+      "base_model": model_id,
+      "reasoning": 10,
+      "tools": False,
+      "region": "us-west-2",
+      "env_key": "AWS_ACCESS_KEY_ID"
+    })
+    configs.append({
+      "name": name + "-Reasoning-Tools",
+      "engine": "bedrock",
+      "base_model": model_id,
+      "reasoning": 10,
+      "tools": True,
+      "region": "us-west-2",
+      "env_key": "AWS_ACCESS_KEY_ID"
+    })
 
   # Amazon Bedrock - Mistral models
-  bedrock_mistral_models = [
-    ("mistral-large-bedrock", "mistral.mistral-large-2402-v1:0"),
-  ]
+  bedrock_mistral_models = [("mistral-large-bedrock", "mistral.mistral-large-2402-v1:0"),
+                            ("mistral-large-3-bedrock", "mistral.mistral-large-3-675b-instruct")]
+
   for name, model_id in bedrock_mistral_models:
     configs.append({
       "name": name,
@@ -354,6 +400,24 @@ def get_default_model_configs() -> List[Dict[str, Any]]:
       "base_model": model_id,
       "reasoning": False,
       "tools": False,
+      "region": "us-east-1",
+      "env_key": "AWS_ACCESS_KEY_ID"
+    })
+    configs.append({
+      "name": name + "-HighReasoning",
+      "engine": "bedrock",
+      "base_model": model_id,
+      "reasoning": 10,
+      "tools": False,
+      "region": "us-east-1",
+      "env_key": "AWS_ACCESS_KEY_ID"
+    })
+    configs.append({
+      "name": name + "-Reasoning-Tools",
+      "engine": "bedrock",
+      "base_model": model_id,
+      "reasoning": 10,
+      "tools": True,
       "region": "us-east-1",
       "env_key": "AWS_ACCESS_KEY_ID"
     })
@@ -520,7 +584,7 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
     print("Available models:")
     for config in all_configs:
       env_key = config.get("env_key")
-      available = "✓" if (env_key is None or os.environ.get(env_key)) else f"✗ (needs {env_key})"
+      available = "+" if (env_key is None or os.environ.get(env_key)) else f"x (needs {env_key})"
       print(f"  {available} {config['name']}")
     sys.exit(0)
 
@@ -587,7 +651,10 @@ def checkSavedPromptCache(aiEngineName: str, index: int, subPass: int, prompt: s
   if aiEngineName == "Human with tools":
     return None
 
-  if FORCE_ARG:
+  # Check both FORCE_ARG and the module's FORCE_REFRESH for robustness
+  import sys
+  cache_module = sys.modules.get('LLMBenchCore.CacheLayer')
+  if FORCE_ARG or (cache_module and getattr(cache_module, 'FORCE_REFRESH', False)):
     return None
 
   try:
@@ -599,7 +666,7 @@ def checkSavedPromptCache(aiEngineName: str, index: int, subPass: int, prompt: s
       with open(result_file, "r", encoding="utf-8") as f:
         saved_result = f.read()
 
-      if IGNORE_CACHED_FAILURES and len(saved_result) <= 3:
+      if IGNORE_CACHED_FAILURES and len(saved_result) <= 10:
         print(
           f"Ignoring prompt cache - IGNORE_CACHED_FAILURES is set and result was '{saved_result}'.")
         return None
@@ -731,7 +798,11 @@ def runTest(index: int, aiEngineHook: callable, aiEngineName: str) -> Dict[str, 
       return cached_result
 
     try:
-      result, chainOfThought = aiEngineHook(prompt, structure, index, idx)
+      r = aiEngineHook(prompt, structure, index, idx)
+      if not isinstance(r, (tuple, list)):
+        print("The following result from the AI engine is about to fail:")
+        print(r)
+      result, chainOfThought = r
     except Exception as e:
       print("Failed to get result for subpass " + str(idx) + " - " + str(e))
       result = ""
@@ -765,7 +836,11 @@ def runTest(index: int, aiEngineHook: callable, aiEngineName: str) -> Dict[str, 
 
   if earlyFail and len(prompts) > 1:
     # Run first prompt sequentially
-    results[0] = run_single_prompt(0, prompts[0])
+    if "earlyFailSubpassSampleCount" in g:
+      for i in range(g["earlyFailSubpassSampleCount"]):
+        results[i] = run_single_prompt(i, prompts[i])
+    else:
+      results[0] = run_single_prompt(0, prompts[0])
   elif "singleThreaded" in g:
     for i, prompt in enumerate(prompts):
       results[i] = run_single_prompt(i, prompt)
@@ -876,17 +951,38 @@ def runTest(index: int, aiEngineHook: callable, aiEngineName: str) -> Dict[str, 
 
   if earlyFail and len(prompts) > 1:
     # Process first subpass sequentially
-    first_score, first_subpass_data = process_subpass(0, results[0])
-    totalScore += first_score
-    subpass_results[0] = first_subpass_data
+    resumeIndex = 1
+    if "earlyFailSubpassSampleCount" in g:
+      resumeIndex = g["earlyFailSubpassSampleCount"]
+      for i in range(g["earlyFailSubpassSampleCount"]):
+        passScore, first_subpass_data = process_subpass(i, results[i])
+        totalScore += passScore
+        subpass_results[i] = first_subpass_data
+      first_score = totalScore / int(g["earlyFailSubpassSampleCount"])
+    else:
+      first_score, first_subpass_data = process_subpass(0, results[0])
+      totalScore += first_score
+      subpass_results[0] = first_subpass_data
 
-    if first_score < 0.5:
+    earlyFailThreshold = 0.5
+    if "earlyFailThreshold" in g:
+      earlyFailThreshold = g["earlyFailThreshold"]
+
+    print(
+      f"Early fail check. {first_score} < {earlyFailThreshold}? {first_score < earlyFailThreshold}")
+
+    if first_score < earlyFailThreshold:
       # Early fail: assume all other subpasses will score 0
       earlyFailTriggered = True
-      for subPass in range(1, len(prompts)):
+
+      earlyFailScore = 0
+      if "earlyFailTestsSameDifficulty" in g:
+        earlyFailScore = first_score
+
+      for subPass in range(resumeIndex, len(prompts)):
         subpass_results[subPass] = {
           "subpass": subPass,
-          "score": 0,
+          "score": earlyFailScore,
           "scoreExplanation": "Skipped due to earlyFail (first subpass scored under 50%)"
         }
     else:
@@ -894,7 +990,7 @@ def runTest(index: int, aiEngineHook: callable, aiEngineName: str) -> Dict[str, 
       with ThreadPoolExecutor() as executor:
         future_to_index = {
           executor.submit(run_single_prompt, i, prompts[i]): i
-          for i in range(1, len(prompts))
+          for i in range(resumeIndex, len(prompts))
         }
         for future in as_completed(future_to_index):
           idx = future_to_index[future]
@@ -910,7 +1006,7 @@ def runTest(index: int, aiEngineHook: callable, aiEngineName: str) -> Dict[str, 
       with ThreadPoolExecutor() as executor:
         future_to_subpass = {
           executor.submit(process_subpass, subPass, results[subPass]): subPass
-          for subPass in range(1, len(prompts))
+          for subPass in range(resumeIndex, len(prompts))
         }
         for future in as_completed(future_to_subpass):
           subPass = future_to_subpass[future]
@@ -1030,6 +1126,14 @@ h2 { color: var(--text-secondary); margin-top: 30px; }
   longestProcessor = (None, None), 0
 
   while True:
+    test_will_run = test_filter is None or testIndex in test_filter
+
+    if not test_will_run:
+      testIndex += 1
+      if not os.path.exists(str(testIndex) + ".py"):
+        break
+      continue
+
     print("\n" + "=" * 60)
     print(f"TEST {testIndex} START")
     print("=" * 60)
