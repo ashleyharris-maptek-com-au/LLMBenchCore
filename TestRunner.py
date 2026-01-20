@@ -1360,7 +1360,7 @@ h2 { color: var(--text-secondary); margin-top: 30px; }
       # Score
       score_class = "score-good" if subpass['score'] >= 0.7 else "score-bad"
       results_file.write(
-        f"    <td rowspan=2class='{score_class}'><strong>{subpass['score']:.4f}</strong>")
+        f"    <td rowspan=2 class='{score_class}'><strong>{subpass['score']:.4f}</strong>")
 
       if "scoreExplanation" in subpass and subpass['scoreExplanation']:
         results_file.write(
