@@ -1177,7 +1177,98 @@ img { max-width: 100%; height: auto; border: 1px solid var(--img-border); }
 h1 { color: var(--text-color); }
 h2 { color: var(--text-secondary); margin-top: 30px; }
 """)
-  results_file.write("</style>\n<meta charset='UTF-8'/> </head>\n<body>\n")
+  results_file.write("</style>\n<meta charset='UTF-8'/>\n")
+  
+  # Add VizManager for WebGL context virtualization - only one active context at a time
+  results_file.write("""
+<script>
+// VizManager: Virtualizes WebGL contexts to prevent "Too many active WebGL contexts" errors
+// Only the visualization closest to the viewport center is active; all others are disposed
+window.VizManager = (function() {
+    const registeredViz = [];
+    let activeVizId = null;
+    let scrollTimeout = null;
+    
+    function getDistanceToViewportCenter(element) {
+        const rect = element.getBoundingClientRect();
+        const viewportCenter = window.innerHeight / 2;
+        const elementCenter = rect.top + rect.height / 2;
+        return Math.abs(elementCenter - viewportCenter);
+    }
+    
+    function updateActiveVisualization() {
+        let closestViz = null;
+        let closestDistance = Infinity;
+        
+        for (const viz of registeredViz) {
+            const container = document.getElementById(viz.containerId);
+            if (!container) continue;
+            
+            // Check if container is in an open <details> element
+            const details = container.closest('details');
+            if (details && !details.open) continue;
+            
+            const distance = getDistanceToViewportCenter(container);
+            if (distance < closestDistance) {
+                closestDistance = distance;
+                closestViz = viz;
+            }
+        }
+        
+        if (closestViz && closestViz.id !== activeVizId) {
+            // Deactivate current
+            if (activeVizId) {
+                const currentViz = registeredViz.find(v => v.id === activeVizId);
+                if (currentViz && currentViz.dispose) {
+                    try { currentViz.dispose(); } catch(e) { console.warn('Dispose error:', e); }
+                }
+            }
+            
+            // Activate new
+            activeVizId = closestViz.id;
+            if (closestViz.activate) {
+                try { closestViz.activate(); } catch(e) { console.warn('Activate error:', e); }
+            }
+        }
+    }
+    
+    function onScrollOrResize() {
+        if (scrollTimeout) clearTimeout(scrollTimeout);
+        scrollTimeout = setTimeout(updateActiveVisualization, 100);
+    }
+    
+    // Listen for scroll and resize
+    window.addEventListener('scroll', onScrollOrResize, { passive: true });
+    window.addEventListener('resize', onScrollOrResize, { passive: true });
+    
+    // Also listen for details toggle events
+    document.addEventListener('toggle', function(e) {
+        if (e.target.tagName === 'DETAILS') {
+            setTimeout(updateActiveVisualization, 50);
+        }
+    }, true);
+    
+    return {
+        register: function(vizConfig) {
+            // vizConfig: { id, containerId, activate, dispose }
+            registeredViz.push(vizConfig);
+            // Trigger update after a short delay to allow DOM to settle
+            setTimeout(updateActiveVisualization, 100);
+        },
+        
+        forceUpdate: function() {
+            updateActiveVisualization();
+        },
+        
+        getActiveId: function() {
+            return activeVizId;
+        }
+    };
+})();
+</script>
+</head>
+<body>
+""")
   results_file.write("<h1>Benchmark Results for " + aiEngineName + "</h1>\n")
   results_file.write("<table>\n")
 
