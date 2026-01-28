@@ -769,7 +769,7 @@ def runTest(index: int, aiEngineHook: callable, aiEngineName: str) -> Dict[str, 
         - 'subpass_results': list of dicts with individual subpass results
     """
   # load test file, compile it, and get its globals in a map:
-  g = {}
+  g = {"__file__": str(index) + ".py"}
 
   if not os.path.exists(str(index) + ".py"):
     raise StopIteration
@@ -1296,8 +1296,11 @@ window.VizManager = (function() {
         break
       test_result = {}
       # Load test metadata
-      test_globals = {}
-      exec(open(str(testIndex) + ".py", encoding="utf-8").read(), test_globals)
+      test_globals = {"__file__": str(testIndex) + ".py"}
+      compiled = compile(
+        open(str(testIndex) + ".py", encoding="utf-8").read(),
+        str(testIndex) + ".py", "exec")
+      exec(compiled, test_globals)
 
       test_was_run = test_filter is None or testIndex in test_filter
       if test_was_run:
