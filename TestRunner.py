@@ -1297,7 +1297,12 @@ window.VizManager = (function() {
       test_result = {}
       # Load test metadata
       test_globals = {}
-      exec(open(str(testIndex) + ".py", encoding="utf-8").read(), test_globals)
+
+      code = compile(
+        open(str(testIndex) + ".py", encoding="utf-8").read(),
+        str(testIndex) + ".py", "exec")
+
+      exec(code, test_globals)
 
       test_was_run = test_filter is None or testIndex in test_filter
       if test_was_run:
