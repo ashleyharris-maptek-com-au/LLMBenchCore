@@ -872,13 +872,6 @@ def runTest(index: int, aiEngineHook: callable, aiEngineName: str) -> Dict[str, 
         idx = future_to_index[future]
         results[idx] = future.result()
 
-  # In placebo mode, make sure we test all the grading functions even if the questions are currently
-  # too hard for me to create an answer.
-  if is_placebo_model(aiEngineName):
-    first_result = next((r for r in results if r is not None), None)
-    if first_result is not None:
-      results = [r if r is not None else first_result for r in results]
-
   # Result processing and grading helper
   def process_subpass(subPass, result):
     score = 0
@@ -1025,6 +1018,7 @@ def runTest(index: int, aiEngineHook: callable, aiEngineName: str) -> Dict[str, 
         }
     elif "singleThreaded" in g:
       for i in range(resumeIndex, len(prompts)):
+        results[i] = run_single_prompt(i, prompts[i])
         passScore, first_subpass_data = process_subpass(i, results[i])
         totalScore += passScore
         subpass_results[i] = first_subpass_data
@@ -1038,12 +1032,6 @@ def runTest(index: int, aiEngineHook: callable, aiEngineName: str) -> Dict[str, 
         for future in as_completed(future_to_index):
           idx = future_to_index[future]
           results[idx] = future.result()
-
-      # In placebo mode, fill in missing results
-      if is_placebo_model(aiEngineName):
-        first_result = next((r for r in results if r is not None), None)
-        if first_result is not None:
-          results = [r if r is not None else first_result for r in results]
 
       # Process remaining subpasses in parallel
       with ThreadPoolExecutor() as executor:
