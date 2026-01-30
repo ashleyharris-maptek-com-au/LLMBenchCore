@@ -219,6 +219,39 @@ def get_default_model_configs() -> List[Dict[str, Any]]:
         "env_key": "OPENAI_API_KEY"
       })
 
+  # Azure OpenAI (optional, configured via env)
+  # Uses deployment name as base_model.
+  configs.append({
+    "name": "gpt-5.2-chat-azure",
+    "engine": "azure_openai",
+    "base_model": "gpt-5.2-chat",
+    "reasoning": False,
+    "tools": False,
+    "env_key": "AZURE_OPENAI_API_KEY",
+    "endpoint": os.environ.get("AZURE_OPENAI_ENDPOINT"),
+    "api_version": os.environ.get("AZURE_OPENAI_API_VERSION")
+  })
+  configs.append({
+    "name": "gpt-5.2-chat-azure-HighReasoning",
+    "engine": "azure_openai",
+    "base_model": "gpt-5.2-chat",
+    "reasoning": 7,
+    "tools": False,
+    "env_key": "AZURE_OPENAI_API_KEY",
+    "endpoint": os.environ.get("AZURE_OPENAI_ENDPOINT"),
+    "api_version": os.environ.get("AZURE_OPENAI_API_VERSION")
+  })
+  configs.append({
+    "name": "gpt-5.2-chat-azure-Reasoning-Tools",
+    "engine": "azure_openai",
+    "base_model": "gpt-5.2-chat",
+    "reasoning": 7,
+    "tools": True,
+    "env_key": "AZURE_OPENAI_API_KEY",
+    "endpoint": os.environ.get("AZURE_OPENAI_ENDPOINT"),
+    "api_version": os.environ.get("AZURE_OPENAI_API_VERSION")
+  })
+
   # Gemini models
   gemini_base_models = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-3-pro-preview"]
   for model in gemini_base_models:
@@ -2066,6 +2099,17 @@ def run_model_config(config: dict, test_filter: Optional[Set[int]] = None):
   elif engine_type == "openai":
     from .AiEngineOpenAiChatGPT import OpenAIEngine
     engine = OpenAIEngine(config["base_model"], config["reasoning"], config["tools"])
+    cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
+    runAllTests(cacheLayer.AIHook, name, test_filter)
+
+  elif engine_type == "azure_openai":
+    from .AiEngineAzureOpenAI import AzureOpenAIEngine
+    endpoint = config.get("endpoint") or os.environ.get("AZURE_OPENAI_ENDPOINT")
+    if not endpoint:
+      print(f"Skipping {name}: AZURE_OPENAI_ENDPOINT not set")
+      return
+    engine = AzureOpenAIEngine(config["base_model"], config["reasoning"], config["tools"],
+                               endpoint, config.get("api_version"))
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
