@@ -251,15 +251,7 @@ def _azure_openai_ai_hook(prompt: str, structure: dict | None, model: str, reaso
     response_params = {"model": model_to_use, "input": input_value}
 
     if isinstance(reasoning, int) and reasoning > 0:
-      if reasoning <= 3:
-        response_params["reasoning"] = {"effort": "low"}
-      elif reasoning <= 7:
-        response_params["reasoning"] = {"effort": "medium"}
-      elif reasoning == 10 and "gpt-5.2" in model_to_use:
-        response_params["reasoning"] = {"effort": "xhigh"}
-      else:
-        response_params["reasoning"] = {"effort": "high"}
-      response_params["reasoning"]["summary"] = "auto"
+      response_params["reasoning"] = {"effort": reasoning, "summary": "auto"}
 
     if structure is not None:
       schema = _sanitize_schema_for_azure(structure)
