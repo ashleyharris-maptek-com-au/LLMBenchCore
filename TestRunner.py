@@ -491,6 +491,18 @@ def get_default_model_configs() -> List[Dict[str, Any]]:
       "env_key": "AWS_ACCESS_KEY_ID"
     })
 
+  # llama.cpp local server (optional, requires running server)
+  # Users can add custom model configs by setting LLAMACPP_BASE_URL
+  if os.environ.get("LLAMACPP_BASE_URL"):
+    llamacpp_model = os.environ.get("LLAMACPP_MODEL_NAME", "llamacpp-local")
+    configs.append({
+      "name": llamacpp_model,
+      "engine": "llamacpp",
+      "base_model": llamacpp_model,
+      "base_url": os.environ.get("LLAMACPP_BASE_URL"),
+      "env_key": "LLAMACPP_BASE_URL"
+    })
+
   return configs
 
 
@@ -2135,6 +2147,16 @@ def run_model_config(config: dict, test_filter: Optional[Set[int]] = None):
     from .AiEngineAmazonBedrock import BedrockEngine
     engine = BedrockEngine(config["base_model"], config["reasoning"], config["tools"],
                            config.get("region", "us-east-1"))
+    cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
+    runAllTests(cacheLayer.AIHook, name, test_filter)
+
+  elif engine_type == "llamacpp":
+    from .AiEngineLlamaCpp import LlamaCppEngine
+    base_url = config.get("base_url") or os.environ.get("LLAMACPP_BASE_URL")
+    if not base_url:
+      print(f"Skipping {name}: LLAMACPP_BASE_URL not set")
+      return
+    engine = LlamaCppEngine(config["base_model"], base_url)
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
