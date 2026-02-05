@@ -52,6 +52,13 @@ export XAI_API_KEY=your_key_here
 export AWS_ACCESS_KEY_ID=your_access_key
 export AWS_SECRET_ACCESS_KEY=your_secret_key
 export AWS_DEFAULT_REGION=us-east-1
+
+# More models
+python your_benchmark.py --list-models
+
+# Self hosted models
+export LLAMACPP_BASE_URL=http://localhost:8080
+export LLAMACPP_MODEL_NAME="deepseek-v2.5"
 ```
 
 ## Usage
@@ -115,6 +122,9 @@ def gradeAnswer(result, subPass, aiEngineName):
 # Run all tests on all available models
 python your_benchmark.py
 
+# Try to use batch pricing where available (but may take up to 48 hours.)
+python your_benchmark.py --batch
+
 # Run specific tests
 python your_benchmark.py -t 1,2,3
 python your_benchmark.py -t 5-10
@@ -123,7 +133,7 @@ python your_benchmark.py -t 5-10
 python your_benchmark.py -m gpt-5-nano
 python your_benchmark.py -m "claude-*"
 
-# Run in parallel
+# Run in parallel 
 python your_benchmark.py --parallel
 
 # List available models
@@ -134,6 +144,10 @@ python your_benchmark.py --force
 
 # Offline mode (cache only)
 python your_benchmark.py --offline
+
+# And more options...
+python your_benchmark.py --help
+
 ```
 
 ## Architecture

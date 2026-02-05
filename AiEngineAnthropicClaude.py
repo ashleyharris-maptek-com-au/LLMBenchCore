@@ -307,6 +307,8 @@ def submit_batch(config: dict, requests: list) -> str | None:
 
   # Build batch requests using the shared helper
   batch_requests = []
+  batch_betas = set()  # Collect betas for batch-level param
+
   for req in requests:
     # Use the shared helper to build params (includes tools, reasoning, structure, schema cleaning)
     params = build_anthropic_message_params(req.prompt,
@@ -315,10 +317,16 @@ def submit_batch(config: dict, requests: list) -> str | None:
                                             reasoning,
                                             tools,
                                             stream=False)
+    # Extract betas from params - must be passed at batch level, not per-request
+    if "betas" in params:
+      batch_betas.update(params.pop("betas"))
     batch_requests.append({"custom_id": req.custom_id, "params": params})
 
-  # Create batch
-  batch = client.messages.batches.create(requests=batch_requests)
+  # Create batch - pass betas at batch level if any are needed
+  if batch_betas:
+    batch = client.beta.messages.batches.create(betas=list(batch_betas), requests=batch_requests)
+  else:
+    batch = client.messages.batches.create(requests=batch_requests)
   return batch.id
 
 

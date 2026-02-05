@@ -255,7 +255,9 @@ def get_default_model_configs() -> List[Dict[str, Any]]:
   })
 
   # Gemini models
-  gemini_base_models = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-3-pro-preview"]
+  gemini_base_models = [
+    "gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-3-pro-preview", "gemini-3-flash-preview"
+  ]
   for model in gemini_base_models:
     configs.append({
       "name": model,
@@ -1205,7 +1207,8 @@ def runAllTests(aiEngineHook: callable, aiEngineName: str, test_filter: Optional
   os.makedirs("results/cot", exist_ok=True)
 
   # Create a results file for the html results of this engines test run
-  results_file = open("results/" + aiEngineName + ".html", "w", buffering=1, encoding="utf-8")
+  resultFilePath = aiEngineName + ".html" if test_filter is None else aiEngineName + ".partial.html"
+  results_file = open("results/" + resultFilePath, "w", buffering=1, encoding="utf-8")
   results_file.write("<html>\n<head>\n<style>\n")
   results_file.write("""
 :root {
@@ -1684,7 +1687,7 @@ window.VizManager = (function() {
   print("BENCHMARK COMPLETE")
   print("=" * 60)
   print(f"Total Score: {overall_total_score:.2f} / {overall_max_score} ({percentage:.1f}%)")
-  print(f"Results saved to: results/{aiEngineName}.html")
+  print(f"Results saved to: results/{resultFilePath}")
   print("=" * 60)
 
   scores = {}
