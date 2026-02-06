@@ -236,20 +236,20 @@ def get_default_model_configs() -> List[Dict[str, Any]]:
     "api_version": os.environ.get("AZURE_OPENAI_API_VERSION")
   })
   configs.append({
-    "name": "gpt-5.2-chat-azure-Reasoning-7",
+    "name": "gpt-5.2-chat-azure-Reasoning",
     "engine": "azure_openai",
     "base_model": "gpt-5.2-chat",
-    "reasoning": 7,
+    "reasoning": 5,
     "tools": False,
     "env_key": "AZURE_OPENAI_API_KEY",
     "endpoint": os.environ.get("AZURE_OPENAI_ENDPOINT"),
     "api_version": os.environ.get("AZURE_OPENAI_API_VERSION")
   })
   configs.append({
-    "name": "gpt-5.2-chat-azure-Reasoning-7-Tools",
+    "name": "gpt-5.2-chat-azure-Reasoning-Tools",
     "engine": "azure_openai",
     "base_model": "gpt-5.2-chat",
-    "reasoning": 7,
+    "reasoning": 5,
     "tools": True,
     "env_key": "AZURE_OPENAI_API_KEY",
     "endpoint": os.environ.get("AZURE_OPENAI_ENDPOINT"),
