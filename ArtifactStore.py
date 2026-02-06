@@ -3,8 +3,6 @@ import subprocess
 import sys
 from dataclasses import dataclass
 
-import OpenScad as vc
-
 from .ResultPaths import model_artifact_dir, result_path
 
 
@@ -52,16 +50,6 @@ class ModelArtifactStore:
 
   def part_name(self, question_num: int, part_index: int) -> str:
     return f"{question_num}_{part_index}_{self.model_name}"
-
-  def run_openscad(self, input_path: str, output_path: str) -> subprocess.CompletedProcess:
-    return subprocess.run([
-      vc.openScadPath,
-      os.path.basename(input_path),
-      "-o",
-      os.path.basename(output_path),
-    ],
-                          cwd=self.root,
-                          check=False)
 
   def run_python_script_to_file(self,
                                 script_path: str,
