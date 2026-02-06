@@ -72,7 +72,4 @@ class ModelArtifactStore:
       subprocess.run([exe, os.path.basename(script_path)], cwd=self.root, stdout=f, check=False)
 
 
-# Backward-compatible aliases.
 ArtifactStore = ModelArtifactStore
-CadArtifactStore = ModelArtifactStore
-

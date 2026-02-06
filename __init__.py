@@ -53,9 +53,6 @@ from .ResultPaths import (
 from .ArtifactStore import (
   ArtifactStore,
   ModelArtifactStore,
-)
-from .CadArtifacts import (
-  CadArtifactStore,
   write_if_changed,
 )
 
@@ -97,6 +94,5 @@ __all__ = [
   'get_current_model',
   'ArtifactStore',
   'ModelArtifactStore',
-  'CadArtifactStore',
   'write_if_changed',
 ]
