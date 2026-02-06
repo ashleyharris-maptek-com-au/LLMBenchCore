@@ -15,6 +15,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from filelock import FileLock
 from .CacheLayer import CacheLayer as cl
+from . import ResultPaths as rp
 
 global UNSKIP
 UNSKIP = False
@@ -730,10 +731,18 @@ def checkSavedPromptCache(aiEngineName: str, index: int, subPass: int, prompt: s
   
   This is checked BEFORE the CacheLayer to avoid API calls when prompts haven't changed.
   """
-  prompt_file = f"results/prompts/{aiEngineName}_{index}_{subPass}.txt"
-  result_file = f"results/raw/{aiEngineName}_{index}_{subPass}.txt"
+  candidate_pairs = [
+    (rp.model_prompt_path(aiEngineName, index, subPass), rp.model_raw_path(aiEngineName, index, subPass)),
+    (rp.legacy_prompt_path(aiEngineName, index, subPass), rp.legacy_raw_path(aiEngineName, index, subPass)),
+  ]
 
-  if not os.path.exists(prompt_file) or not os.path.exists(result_file):
+  selected_pair = None
+  for prompt_file, result_file in candidate_pairs:
+    if os.path.exists(prompt_file) and os.path.exists(result_file):
+      selected_pair = (prompt_file, result_file)
+      break
+
+  if selected_pair is None:
     return None
 
   if is_placebo_model(aiEngineName):
@@ -744,6 +753,8 @@ def checkSavedPromptCache(aiEngineName: str, index: int, subPass: int, prompt: s
   cache_module = sys.modules.get('LLMBenchCore.CacheLayer')
   if FORCE_ARG or (cache_module and getattr(cache_module, 'FORCE_REFRESH', False)):
     return None
+
+  prompt_file, result_file = selected_pair
 
   try:
     with open(prompt_file, "r", encoding="utf-8") as f:
@@ -803,12 +814,16 @@ def propogateUpwardsHack(aiEngineName: str, index: int, subPass: int, score: flo
     return
 
   # Copy results to higher-grade models from same company
-  prompt_file = f"results/prompts/{aiEngineName}_{index}_{subPass}.txt"
-  result_file = f"results/raw/{aiEngineName}_{index}_{subPass}.txt"
-  cot_file = f"results/cot/{aiEngineName}_{index}_{subPass}.txt"
+  prompt_file = rp.model_prompt_path(aiEngineName, index, subPass)
+  result_file = rp.model_raw_path(aiEngineName, index, subPass)
+  cot_file = rp.model_cot_path(aiEngineName, index, subPass)
 
   if not os.path.exists(prompt_file) or not os.path.exists(result_file):
-    return
+    prompt_file = rp.legacy_prompt_path(aiEngineName, index, subPass)
+    result_file = rp.legacy_raw_path(aiEngineName, index, subPass)
+    cot_file = rp.legacy_cot_path(aiEngineName, index, subPass)
+    if not os.path.exists(prompt_file) or not os.path.exists(result_file):
+      return
 
   for i in range(current_idx + 1, len(ALL_MODEL_CONFIGS)):
     other_name = ALL_MODEL_CONFIGS[i].get('name', '')
@@ -818,9 +833,10 @@ def propogateUpwardsHack(aiEngineName: str, index: int, subPass: int, score: flo
       continue
 
     # Copy files to higher-grade model
-    target_prompt = f"results/prompts/{other_name}_{index}_{subPass}.txt"
-    target_result = f"results/raw/{other_name}_{index}_{subPass}.txt"
-    target_cot = f"results/cot/{other_name}_{index}_{subPass}.txt"
+    target_prompt = rp.model_prompt_path(other_name, index, subPass)
+    target_result = rp.model_raw_path(other_name, index, subPass)
+    target_cot = rp.model_cot_path(other_name, index, subPass)
+    rp.ensure_model_dirs(other_name)
 
     # Only copy if target doesn't already exist
     if not os.path.exists(target_prompt):
@@ -905,23 +921,20 @@ def runTest(index: int, aiEngineHook: callable, aiEngineName: str) -> Dict[str, 
       chainOfThought = "Exception was thrown: " + str(e)
 
     try:
-      open("results/raw/" + aiEngineName + "_" + str(index) + "_" + str(idx) + ".txt",
-           "w",
-           encoding="utf-8").write(str(result))
+      open(rp.model_raw_path(aiEngineName, index, idx), "w", encoding="utf-8").write(str(result))
     except Exception as e:
       print("Failed to save result for subpass " + str(idx) + " - " + str(e))
 
     try:
-      open("results/prompts/" + aiEngineName + "_" + str(index) + "_" + str(idx) + ".txt",
+      open(rp.model_prompt_path(aiEngineName, index, idx),
            "w",
            encoding="utf-8").write(str(prompts[idx]))
     except Exception as e:
       print("Failed to save prompt for subpass " + str(idx) + " - " + str(e))
 
     try:
-      open("results/cot/" + aiEngineName + "_" + str(index) + "_" + str(idx) + ".txt",
-           "w",
-           encoding="utf-8").write(str(chainOfThought))
+      open(rp.model_cot_path(aiEngineName, index, idx), "w", encoding="utf-8").write(
+        str(chainOfThought))
     except Exception as e:
       print("Failed to save chain of thought for subpass " + str(idx) + " - " + str(e))
 
@@ -1212,15 +1225,14 @@ def runAllTests(aiEngineHook: callable, aiEngineName: str, test_filter: Optional
         aiEngineName: Name of the AI engine
         test_filter: Optional set of test indices to run. If None, runs all tests.
     """
-  # Create results directory and subdirectories
-  os.makedirs("results", exist_ok=True)
-  os.makedirs("results/raw", exist_ok=True)
-  os.makedirs("results/prompts", exist_ok=True)
-  os.makedirs("results/cot", exist_ok=True)
+  rp.ensure_global_result_dirs()
+  rp.ensure_model_dirs(aiEngineName)
+  current_model_token = rp.set_current_model(aiEngineName)
 
   # Create a results file for the html results of this engines test run
-  resultFilePath = aiEngineName + ".html" if test_filter is None else aiEngineName + ".partial.html"
-  results_file = open("results/" + resultFilePath, "w", buffering=1, encoding="utf-8")
+  resultFilePath = rp.model_report_path(aiEngineName) if test_filter is None else os.path.join(
+    rp.model_root(aiEngineName), "report.partial.html")
+  results_file = open(resultFilePath, "w", buffering=1, encoding="utf-8")
   results_file.write("<html>\n<head>\n<style>\n")
   results_file.write("""
 :root {
@@ -1470,13 +1482,17 @@ window.VizManager = (function() {
       if "[[image:" not in prompt:
         return prompt
 
-      while "[[image:results/" in prompt:
-        prompt = prompt.replace("[[image:results/", "[[image:")
-
-      while "[[image:images/" in prompt:
-        prompt = prompt.replace("[[image:images/", "[[image:../images/")
-
-      return prompt.replace("[[image:", "<img src='").replace("]]", "' width='200px'>")
+      out = prompt
+      while "[[image:" in out and "]]" in out:
+        start = out.find("[[image:")
+        end = out.find("]]", start)
+        if end < 0:
+          break
+        raw_ref = out[start + len("[[image:"):end].strip()
+        mapped_ref = rp.convert_prompt_image_ref_for_model_report(raw_ref, aiEngineName)
+        replacement = f"<img src='{html.escape(mapped_ref)}' width='200px'>"
+        out = out[:start] + replacement + out[end + 2:]
+      return out
 
     if "prepareSubpassPrompt" in test_globals:
       # Show first subpass prompt
@@ -1638,7 +1654,8 @@ window.VizManager = (function() {
               img_data = base64.b64encode(img_file.read()).decode('utf-8')
               results_file.write(f"<img src='data:image/png;base64,{img_data}' alt='Output'>")
           except:
-            results_file.write(f"<a href='../{subpass['output_image']}'>View Output Image</a>")
+            output_rel = rp.relative_path_from_model_root(subpass['output_image'], aiEngineName)
+            results_file.write(f"<a href='{output_rel}'>View Output Image</a>")
         else:
           results_file.write("Image not found")
 
@@ -1655,8 +1672,8 @@ window.VizManager = (function() {
               img_data = base64.b64encode(img_file.read()).decode('utf-8')
               results_file.write(f"<img src='data:image/png;base64,{img_data}' alt='Reference'>")
           except:
-            results_file.write(
-              f"<a href='../{subpass['reference_image']}'>View Reference Image</a>")
+            reference_rel = rp.relative_path_from_model_root(subpass['reference_image'], aiEngineName)
+            results_file.write(f"<a href='{reference_rel}'>View Reference Image</a>")
         else:
           results_file.write("No reference image")
         results_file.write("</td>\n")
@@ -1699,7 +1716,7 @@ window.VizManager = (function() {
   print("BENCHMARK COMPLETE")
   print("=" * 60)
   print(f"Total Score: {overall_total_score:.2f} / {overall_max_score} ({percentage:.1f}%)")
-  print(f"Results saved to: results/{resultFilePath}")
+  print(f"Results saved to: {resultFilePath}")
   print("=" * 60)
 
   scores = {}
@@ -2051,7 +2068,7 @@ window.VizManager = (function() {
                     <td>{html.escape(engine_name)}{badge}</td>
                     <td class="score-cell {score_class}">{score_float:.4f}</td>
                     <td class="{score_class}">{percentage if percentage < 100 else 0:.1f}%</td>
-                    <td><a href="{html.escape(engine_name)}.html">View Details →</a></td>
+                    <td><a href="{html.escape(rp.model_report_href(engine_name))}">View Details →</a></td>
                 </tr>
 """)
 
@@ -2114,7 +2131,7 @@ window.VizManager = (function() {
         <img src="../images/{q_num}.png" style="float:right; max-width:400px">
         <a name="q{q_num}"><h2 style="margin-top: 0;color:#fff">Q{q_num}: {html.escape(q_data['title'])}</h2></a>
         {g.get("highLevelSummary","")}
-        <p style='clear:both'><strong>Best result:</strong> <a href="{html.escape(q_data['best_engine'])}.html#q{q_num}">{html.escape(q_data['best_engine'])}</a> ({q_data['best_pct']:.1f}%)</p>
+        <p style='clear:both'><strong>Best result:</strong> <a href="{html.escape(rp.model_report_href_with_anchor(q_data['best_engine'], f'q{q_num}'))}">{html.escape(q_data['best_engine'])}</a> ({q_data['best_pct']:.1f}%)</p>
         {baseline_compare}
         <details>
             <summary style="cursor:pointer; color:#667eea;">Click to show comparison graph</summary>
@@ -2135,6 +2152,7 @@ window.VizManager = (function() {
 
   print(f"Landing page saved to: results/index.html")
   print(f"Longest processing time: {longestProcessor[1]} seconds for test {longestProcessor[0]}")
+  rp.reset_current_model(current_model_token)
 
 
 def run_model_config(config: dict, test_filter: Optional[Set[int]] = None):
@@ -2162,7 +2180,7 @@ def run_model_config(config: dict, test_filter: Optional[Set[int]] = None):
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
-  elif engine_type == "azure-openai":
+  elif engine_type in ("azure-openai", "azure_openai"):
     from .AiEngineAzureOpenAI import AzureOpenAIEngine
     timeout = config.get("timeout") or API_TIMEOUT_OVERRIDE or 3600
     engine = AzureOpenAIEngine(config["base_model"], config["reasoning"], config["tools"],

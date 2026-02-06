@@ -50,6 +50,21 @@ def _supports_responses(api_version: str | None) -> bool:
     return True
 
 
+def _map_azure_reasoning_effort(reasoning) -> str | None:
+  """Map runner reasoning config to Azure Responses API effort strings."""
+  if isinstance(reasoning, int) and reasoning > 0:
+    if reasoning <= 3:
+      return "low"
+    if reasoning <= 5:
+      return "medium"
+    return "high"
+
+  if isinstance(reasoning, str) and reasoning in {"minimal", "low", "medium", "high"}:
+    return reasoning
+
+  return None
+
+
 def _sanitize_schema_for_azure(schema):
   if isinstance(schema, dict):
     return {
@@ -208,7 +223,7 @@ def _azure_openai_ai_hook(prompt: str, structure: dict | None, model: str, reaso
 
     # Azure uses deployment name for model
     model_to_use = model
-    if isinstance(reasoning, str) and reasoning:
+    if isinstance(reasoning, str) and reasoning and _map_azure_reasoning_effort(reasoning) is None:
       # Allow override by deployment name if supplied as a string.
       model_to_use = reasoning
 
@@ -240,9 +255,16 @@ def _azure_openai_ai_hook(prompt: str, structure: dict | None, model: str, reaso
         if output_text:
           try:
             return json.loads(output_text), ""
-          except json.JSONDecodeError:
-            print("Error decoding JSON response. Returning raw text for parsing.")
-            return output_text, ""
+          except json.JSONDecodeError as parse_error:
+            print(
+              f"Warning: Failed to parse Azure structured JSON, attempting json_repair: {parse_error}"
+            )
+            try:
+              import json_repair
+              repaired = json_repair.repair_json(output_text)
+              return json.loads(repaired), ""
+            except Exception as repair_error:
+              print(f"Warning: Failed to repair Azure structured JSON response: {repair_error}")
         return {}, ""
       else:
         return output_text or "", ""
@@ -251,8 +273,9 @@ def _azure_openai_ai_hook(prompt: str, structure: dict | None, model: str, reaso
 
     response_params = {"model": model_to_use, "input": input_value}
 
-    if isinstance(reasoning, int) and reasoning > 0:
-      response_params["reasoning"] = {"effort": reasoning, "summary": "auto"}
+    reasoning_effort = _map_azure_reasoning_effort(reasoning)
+    if reasoning_effort:
+      response_params["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
 
     if structure is not None:
       schema = _sanitize_schema_for_azure(structure)
@@ -308,15 +331,22 @@ def _azure_openai_ai_hook(prompt: str, structure: dict | None, model: str, reaso
       if output_text:
         try:
           return json.loads(output_text), chain_of_thought
-        except json.JSONDecodeError:
-          print("Error decoding JSON response. Returning raw text for parsing.")
-          return output_text, chain_of_thought
+        except json.JSONDecodeError as parse_error:
+          print(
+            f"Warning: Failed to parse Azure structured JSON, attempting json_repair: {parse_error}"
+          )
+          try:
+            import json_repair
+            repaired = json_repair.repair_json(output_text)
+            return json.loads(repaired), chain_of_thought
+          except Exception as repair_error:
+            print(f"Warning: Failed to repair Azure structured JSON response: {repair_error}")
       return {}, chain_of_thought
     else:
       return output_text or "", chain_of_thought
 
   except json.JSONDecodeError:
-    print("Error decoding JSON response. Returning raw text for parsing.")
+    print("Unexpected JSON decode error in Azure OpenAI engine.")
     return last_output_text or {"unacceptableFailure": True}, ""
   except Exception as e:
     print(f"Error calling Azure OpenAI API: {e}")

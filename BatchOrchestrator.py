@@ -25,6 +25,7 @@ from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from . import ResultPaths as rp
 
 # Import CacheLayer as a module (avoid package attribute that may resolve to the class)
 CacheModule = importlib.import_module("LLMBenchCore.CacheLayer")
@@ -153,13 +154,12 @@ class BatchOrchestrator:
   def write_result_to_prompt_cache(self, request: BatchRequest, result: Any,
                                    chain_of_thought: str) -> None:
     """Write result to the prompt/raw/cot cache files (like CacheLayer does)."""
-    os.makedirs("results/raw", exist_ok=True)
-    os.makedirs("results/prompts", exist_ok=True)
-    os.makedirs("results/cot", exist_ok=True)
+    rp.ensure_global_result_dirs()
+    rp.ensure_model_dirs(request.engine_name)
 
-    raw_file = f"results/raw/{request.engine_name}_{request.test_index}_{request.sub_pass}.txt"
-    prompt_file = f"results/prompts/{request.engine_name}_{request.test_index}_{request.sub_pass}.txt"
-    cot_file = f"results/cot/{request.engine_name}_{request.test_index}_{request.sub_pass}.txt"
+    raw_file = rp.model_raw_path(request.engine_name, request.test_index, request.sub_pass)
+    prompt_file = rp.model_prompt_path(request.engine_name, request.test_index, request.sub_pass)
+    cot_file = rp.model_cot_path(request.engine_name, request.test_index, request.sub_pass)
 
     with open(raw_file, "w", encoding="utf-8") as f:
       f.write(str(result))
@@ -589,8 +589,12 @@ def handle_early_fail_follow_ups(orchestrator: BatchOrchestrator,
       initial_results_found = 0
 
       for sub_pass in range(initial_count):
-        result_file = f"results/raw/{engine_name}_{test_index}_{sub_pass}.txt"
-        if os.path.exists(result_file):
+        result_file_candidates = [
+          rp.model_raw_path(engine_name, test_index, sub_pass),
+          rp.legacy_raw_path(engine_name, test_index, sub_pass),
+        ]
+        result_file = next((p for p in result_file_candidates if os.path.exists(p)), None)
+        if result_file:
           try:
             with open(result_file, "r", encoding="utf-8") as f:
               result_str = f.read()
