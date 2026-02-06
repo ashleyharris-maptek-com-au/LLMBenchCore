@@ -162,13 +162,14 @@ class BenchmarkRunner(ABC):
     return self.filter_model_configs(configs)
 
   def run(self,
-          test_filter: Optional[Set[int]] = None,
+          test_filter: Optional[Dict[int, Optional[Set[int]]]] = None,
           model_filter: Optional[Set[str]] = None) -> None:
     """
     Run the benchmark with the given filters.
     
     Args:
-        test_filter: Optional set of test indices to run
+        test_filter: Optional dict mapping test indices to subtask filters.
+                     None value means run all subtasks, Set[int] means specific subtasks.
         model_filter: Optional set of model names to run
     """
     global ALL_MODEL_CONFIGS
@@ -523,6 +524,8 @@ Examples:
   python <script>.py --list-models            # List all available model names
   python <script>.py -t 1,2,3                 # Run only tests 1, 2, 3
   python <script>.py -t 5-10                  # Run tests 5 through 10
+  python <script>.py -t 2.3                   # Run only subtask 3 of test 2
+  python <script>.py -t 2.0,2.3,2.5           # Run subtasks 0, 3, 5 of test 2
   python <script>.py -m gpt-5-nano            # Run only gpt-5-nano model
   python <script>.py -m "gpt-5-nano,gpt-5.1"  # Run multiple specific models
   python <script>.py -m "nova-*"              # Run all models matching wildcard pattern
@@ -533,11 +536,11 @@ Examples:
   python <script>.py --batch -m "gpt-*,claude-*"  # Batch mode for specific models
     """)
 
-  parser.add_argument(
-    "-t",
-    "--tests",
-    type=str,
-    help="Comma-separated list of test indices or ranges (e.g., '1,2,3' or '5-10' or '1,5-10,15')")
+  parser.add_argument("-t",
+                      "--tests",
+                      type=str,
+                      help="Comma-separated list of test indices, ranges, or subtasks "
+                      "(e.g., '1,2,3' or '5-10' or '2.3' for subtask 3 of test 2)")
   parser.add_argument(
     "-m",
     "--models",
@@ -665,7 +668,16 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
   test_filter = None
   if args.tests:
     test_filter = parse_test_filter(args.tests)
-    print(f"Running tests: {sorted(test_filter)}")
+    # Format filter for display
+    filter_parts = []
+    for t in sorted(test_filter.keys()):
+      subtasks = test_filter[t]
+      if subtasks is None:
+        filter_parts.append(str(t))
+      else:
+        for s in sorted(subtasks):
+          filter_parts.append(f"{t}.{s}")
+    print(f"Running tests: {', '.join(filter_parts)}")
 
   # Parse model filter with wildcard support
   model_filter = None
@@ -854,9 +866,18 @@ def propogateUpwardsHack(aiEngineName: str, index: int, subPass: int, score: flo
         print(f"Failed to propagate result: {e}")
 
 
-def runTest(index: int, aiEngineHook: callable, aiEngineName: str) -> Dict[str, Any]:
+def runTest(index: int,
+            aiEngineHook: callable,
+            aiEngineName: str,
+            subtask_filter: Optional[Set[int]] = None) -> Dict[str, Any]:
   """
     Run a test and return results including score and any generated images.
+    
+    Args:
+        index: Test index number
+        aiEngineHook: The AI engine hook function
+        aiEngineName: Name of the AI engine
+        subtask_filter: Optional set of subtask indices to run. If None, runs all subtasks.
     
     Returns a dictionary containing:
         - 'average_score': float - average score across all subpasses
@@ -944,22 +965,33 @@ def runTest(index: int, aiEngineHook: callable, aiEngineName: str) -> Dict[str, 
   earlyFail = "earlyFail" in g
   results = [None] * len(prompts)
 
-  if earlyFail and len(prompts) > 1:
+  # Determine which subtasks to run
+  def should_run_subtask(idx):
+    return subtask_filter is None or idx in subtask_filter
+
+  if subtask_filter:
+    for i, prompt in enumerate(prompts):
+      if should_run_subtask(i):
+        results[i] = run_single_prompt(i, prompt)
+  elif earlyFail and len(prompts) > 1:
     # Run first prompt sequentially
     if "earlyFailSubpassSampleCount" in g:
       for i in range(g["earlyFailSubpassSampleCount"]):
-        results[i] = run_single_prompt(i, prompts[i])
+        if should_run_subtask(i):
+          results[i] = run_single_prompt(i, prompts[i])
     else:
-      results[0] = run_single_prompt(0, prompts[0])
+      if should_run_subtask(0):
+        results[0] = run_single_prompt(0, prompts[0])
   elif "singleThreaded" in g:
     for i, prompt in enumerate(prompts):
-      results[i] = run_single_prompt(i, prompt)
+      if should_run_subtask(i):
+        results[i] = run_single_prompt(i, prompt)
   else:
     # Parallelize AI engine calls
     with ThreadPoolExecutor() as executor:
       future_to_index = {
         executor.submit(run_single_prompt, i, prompt): i
-        for i, prompt in enumerate(prompts)
+        for i, prompt in enumerate(prompts) if should_run_subtask(i)
       }
       for future in as_completed(future_to_index):
         idx = future_to_index[future]
@@ -1081,6 +1113,10 @@ def runTest(index: int, aiEngineHook: callable, aiEngineName: str) -> Dict[str, 
   subpass_results = [None] * len(prompts)
   earlyFailTriggered = False
 
+  # When subtask_filter is specified, skip earlyFail logic - just run the specified subtasks
+  if subtask_filter is not None:
+    earlyFail = False
+
   if earlyFail and len(prompts) > 1:
     # Process first subpass sequentially
     resumeIndex = 1
@@ -1151,6 +1187,8 @@ def runTest(index: int, aiEngineHook: callable, aiEngineName: str) -> Dict[str, 
 
   elif "singleThreaded" in g:
     for i, result in enumerate(results):
+      if result is None:
+        continue  # Skip subtasks that weren't run (due to subtask_filter)
       score, subpass_data = process_subpass(i, result)
       totalScore += score
       subpass_results[i] = subpass_data
@@ -1158,7 +1196,7 @@ def runTest(index: int, aiEngineHook: callable, aiEngineName: str) -> Dict[str, 
     with ThreadPoolExecutor() as executor:
       future_to_subpass = {
         executor.submit(process_subpass, subPass, result): subPass
-        for subPass, result in enumerate(results)
+        for subPass, result in enumerate(results) if result is not None
       }
       for future in as_completed(future_to_subpass):
         subPass = future_to_subpass[future]
@@ -1209,22 +1247,28 @@ def runTest(index: int, aiEngineHook: callable, aiEngineName: str) -> Dict[str, 
         if report_time > 1: print(f"Result to nice report {subPass} took {report_time:.2f}s")
       subpass_results.append(subpass_data)
       print()
+  # Filter out None entries (subtasks that weren't run due to subtask_filter)
+  actual_subpass_results = [r for r in subpass_results if r is not None]
   return {
-    "average_score": totalScore / len(results) if results else 0,
+    "average_score": totalScore / len(actual_subpass_results) if actual_subpass_results else 0,
     "total_score": max(0, totalScore),
-    "subpass_count": len(subpass_results),
-    "subpass_results": subpass_results
+    "subpass_count": len(actual_subpass_results),
+    "subpass_results": actual_subpass_results
   }
 
 
-def runAllTests(aiEngineHook: callable, aiEngineName: str, test_filter: Optional[Set[int]] = None):
+def runAllTests(aiEngineHook: callable,
+                aiEngineName: str,
+                test_filter: Optional[Dict[int, Optional[Set[int]]]] = None):
   """
     Run all tests for an AI engine.
     
     Args:
         aiEngineHook: The AI engine hook function
         aiEngineName: Name of the AI engine
-        test_filter: Optional set of test indices to run. If None, runs all tests.
+        test_filter: Optional dict mapping test indices to subtask filters.
+                     If None, runs all tests. If a test maps to None, runs all subtasks.
+                     If a test maps to a Set[int], runs only those subtasks.
     """
   rp.ensure_global_result_dirs()
   rp.ensure_model_dirs(aiEngineName)
@@ -1384,6 +1428,7 @@ window.VizManager = (function() {
 
   while True:
     test_will_run = test_filter is None or testIndex in test_filter
+    subtask_filter = test_filter.get(testIndex) if test_filter else None
 
     if not test_will_run:
       testIndex += 1
@@ -1408,7 +1453,7 @@ window.VizManager = (function() {
 
       test_was_run = test_filter is None or testIndex in test_filter
       if test_was_run:
-        test_result = runTest(testIndex, aiEngineHook, aiEngineName)
+        test_result = runTest(testIndex, aiEngineHook, aiEngineName, subtask_filter)
       else:
         test_result = {"total_score": 0, "subpass_count": 0, "subpass_results": []}
 
@@ -1423,10 +1468,15 @@ window.VizManager = (function() {
       # Track per-question scores (only for tests that were actually run)
       if test_was_run:
         question_title = test_globals.get("title", f"Test {current_test_index}")
+        # Build subtask scores dict: {subtask_num: score}
+        subtask_scores = {}
+        for subpass in test_result['subpass_results']:
+          subtask_scores[subpass['subpass']] = subpass['score']
         per_question_scores[current_test_index] = {
           "title": question_title,
           "score": test_result['total_score'],
-          "max": max_score
+          "max": max_score,
+          "subtasks": subtask_scores
         }
 
     except StopIteration:
@@ -1867,6 +1917,65 @@ window.VizManager = (function() {
       "best_pct": best_score * 100
     }
 
+  # Generate per-subtask graphs
+  subtask_graphs = {
+  }  # {(question_num, subtask_num): {"filename": str, "best_engine": str, "best_pct": float}}
+
+  for q_num in sorted(all_questions):
+    q_str = str(q_num)
+    # Get all subtask numbers for this question from all engines
+    all_subtasks = set()
+    for engine_data in all_per_question.values():
+      if q_str in engine_data and "subtasks" in engine_data[q_str]:
+        all_subtasks.update(int(s) for s in engine_data[q_str]["subtasks"].keys())
+
+    for subtask_num in sorted(all_subtasks):
+      subtask_str = str(subtask_num)
+      # Collect scores for this subtask from all engines
+      engine_scores = []
+
+      for engine_name, engine_data in all_per_question.items():
+        if q_str in engine_data and "subtasks" in engine_data[q_str]:
+          subtasks = engine_data[q_str]["subtasks"]
+          if subtask_str in subtasks:
+            score = subtasks[subtask_str]
+            engine_scores.append((engine_name, score))
+
+      if not engine_scores:
+        continue
+
+      # Sort by score descending
+      engine_scores.sort(key=lambda x: x[1], reverse=True)
+      engines = [e[0] for e in engine_scores]
+      scores_list = [e[1] for e in engine_scores]
+
+      # Generate graph
+      fig, ax = plt.subplots(figsize=(8, max(2, len(engines) * 0.35)))
+      ax.barh(engines, scores_list, color='#10b981')
+      ax.set_xlabel("Score")
+      ax.set_ylabel("")
+      ax.set_title(f"Q{q_num}.{subtask_num}")
+      ax.set_xlim(0, 1)
+      ax.invert_yaxis()
+      plt.tight_layout()
+
+      filename = f"question_{q_num}_subtask_{subtask_num}.png"
+      plt.savefig(f"results/{filename}", dpi=100)
+      plt.close()
+
+      best_engine, best_score = engine_scores[0] if engine_scores else ("", 0)
+      if is_placebo_model(best_engine):
+        best_engine, best_score = next(
+          ((name, score) for name, score in engine_scores if not is_placebo_model(name)),
+          ("", 0),
+        )
+
+      subtask_graphs[(q_num, subtask_num)] = {
+        "filename": filename,
+        "best_engine": best_engine,
+        "best_pct": best_score * 100
+      }
+
   # Generate index.html landing page
   index_lock = FileLock("results/index.html.lock")
   with index_lock, open("results/index.html", "w", encoding="utf-8") as index_file:
@@ -2128,6 +2237,32 @@ window.VizManager = (function() {
                                 "placebo baseline scored 0 or hasn't attempted.</p>")
 
         q_data = question_graphs[q_num]
+
+        # Build subtask breakdown HTML
+        subtask_html = ""
+        q_subtasks = [(s, subtask_graphs[(q_num, s)])
+                      for s in sorted([st for (q, st) in subtask_graphs.keys() if q == q_num])]
+        if q_subtasks:
+          subtask_rows = []
+          for subtask_num, st_data in q_subtasks:
+            score_color = "#10b981" if st_data[
+              'best_pct'] >= 70 else "#f59e0b" if st_data['best_pct'] >= 40 else "#ef4444"
+            subtask_rows.append(f"""
+              <tr>
+                <td><strong>{q_num}.{subtask_num}</strong></td>
+                <td><a href="{html.escape(rp.model_report_href_with_anchor(st_data['best_engine'], f'q{q_num}'))}">{html.escape(st_data['best_engine'])}</a></td>
+                <td style="color:{score_color}; font-weight:bold;">{st_data['best_pct']:.1f}%</td>
+                <td><details style="display:inline"><summary style="cursor:pointer; color:#667eea; font-size:0.9em;">graph</summary><img src="{st_data['filename']}" style="max-width:400px; margin-top:5px;"></details></td>
+              </tr>""")
+          subtask_html = f"""
+        <details style="margin-top:15px;">
+            <summary style="cursor:pointer; color:#667eea;"><strong>Subtask Breakdown ({len(q_subtasks)} subtasks)</strong></summary>
+            <table style="width:100%; margin-top:10px; font-size:0.9em;">
+              <thead><tr style="background:#4a5568;"><th>Subtask</th><th>Best Engine</th><th>Score</th><th>Graph</th></tr></thead>
+              <tbody>{"".join(subtask_rows)}</tbody>
+            </table>
+        </details>"""
+
         index_file.write(f"""
     <div class="graph-container" id="q{q_num}">
         <img src="../images/{q_num}.png" style="float:right; max-width:400px">
@@ -2139,6 +2274,7 @@ window.VizManager = (function() {
             <summary style="cursor:pointer; color:#667eea;">Click to show comparison graph</summary>
             <img src="{q_data['filename']}" alt="Question {q_num} Results" style="margin-top:10px;">
         </details>
+        {subtask_html}
     </div>
 """)
 
@@ -2157,7 +2293,7 @@ window.VizManager = (function() {
   rp.reset_current_model(current_model_token)
 
 
-def run_model_config(config: dict, test_filter: Optional[Set[int]] = None):
+def run_model_config(config: dict, test_filter: Optional[Dict[int, Optional[Set[int]]]] = None):
   """Run tests for a single model configuration."""
   name = config["name"]
   engine_type = config["engine"]
@@ -2250,16 +2386,48 @@ def run_model_config(config: dict, test_filter: Optional[Set[int]] = None):
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
 
-def parse_test_filter(test_arg: str) -> Set[int]:
-  """Parse test filter argument into a set of test indices."""
-  tests = set()
+def parse_test_filter(test_arg: str) -> Dict[int, Optional[Set[int]]]:
+  """
+  Parse test filter argument into a dict mapping test indices to subtask filters.
+  
+  Supports formats:
+    - "2" -> run all subtasks of test 2
+    - "2.3" -> run only subtask 3 of test 2
+    - "2.3,2.5" -> run subtasks 3 and 5 of test 2
+    - "2-4" -> run all subtasks of tests 2, 3, 4
+    - "2,3.1,4" -> run all of test 2, subtask 1 of test 3, all of test 4
+  
+  Returns:
+    Dict mapping test index to Optional[Set[int]]:
+      - None means run all subtasks
+      - Set[int] means run only those specific subtasks
+  """
+  tests: Dict[int, Optional[Set[int]]] = {}
   for part in test_arg.split(","):
     part = part.strip()
-    if "-" in part:
+    if "." in part:
+      # Subtask specification: "2.3"
+      test_str, subtask_str = part.split(".", 1)
+      test_idx = int(test_str)
+      subtask_idx = int(subtask_str)
+      if test_idx not in tests:
+        tests[test_idx] = set()
+      # If already set to None (all subtasks), keep it as specific subtasks
+      if tests[test_idx] is None:
+        tests[test_idx] = {subtask_idx}
+      else:
+        tests[test_idx].add(subtask_idx)
+    elif "-" in part:
+      # Range specification: "2-4"
       start, end = part.split("-", 1)
-      tests.update(range(int(start), int(end) + 1))
+      for t in range(int(start), int(end) + 1):
+        if t not in tests:
+          tests[t] = None  # All subtasks
     else:
-      tests.add(int(part))
+      # Single test: "2"
+      test_idx = int(part)
+      if test_idx not in tests:
+        tests[test_idx] = None  # All subtasks
   return tests
 
 
