@@ -732,8 +732,10 @@ def checkSavedPromptCache(aiEngineName: str, index: int, subPass: int, prompt: s
   This is checked BEFORE the CacheLayer to avoid API calls when prompts haven't changed.
   """
   candidate_pairs = [
-    (rp.model_prompt_path(aiEngineName, index, subPass), rp.model_raw_path(aiEngineName, index, subPass)),
-    (rp.legacy_prompt_path(aiEngineName, index, subPass), rp.legacy_raw_path(aiEngineName, index, subPass)),
+    (rp.model_prompt_path(aiEngineName, index,
+                          subPass), rp.model_raw_path(aiEngineName, index, subPass)),
+    (rp.legacy_prompt_path(aiEngineName, index,
+                           subPass), rp.legacy_raw_path(aiEngineName, index, subPass)),
   ]
 
   selected_pair = None
@@ -926,15 +928,14 @@ def runTest(index: int, aiEngineHook: callable, aiEngineName: str) -> Dict[str, 
       print("Failed to save result for subpass " + str(idx) + " - " + str(e))
 
     try:
-      open(rp.model_prompt_path(aiEngineName, index, idx),
-           "w",
+      open(rp.model_prompt_path(aiEngineName, index, idx), "w",
            encoding="utf-8").write(str(prompts[idx]))
     except Exception as e:
       print("Failed to save prompt for subpass " + str(idx) + " - " + str(e))
 
     try:
-      open(rp.model_cot_path(aiEngineName, index, idx), "w", encoding="utf-8").write(
-        str(chainOfThought))
+      open(rp.model_cot_path(aiEngineName, index, idx), "w",
+           encoding="utf-8").write(str(chainOfThought))
     except Exception as e:
       print("Failed to save chain of thought for subpass " + str(idx) + " - " + str(e))
 
@@ -1672,7 +1673,8 @@ window.VizManager = (function() {
               img_data = base64.b64encode(img_file.read()).decode('utf-8')
               results_file.write(f"<img src='data:image/png;base64,{img_data}' alt='Reference'>")
           except:
-            reference_rel = rp.relative_path_from_model_root(subpass['reference_image'], aiEngineName)
+            reference_rel = rp.relative_path_from_model_root(subpass['reference_image'],
+                                                             aiEngineName)
             results_file.write(f"<a href='{reference_rel}'>View Reference Image</a>")
         else:
           results_file.write("No reference image")
@@ -2173,18 +2175,23 @@ def run_model_config(config: dict, test_filter: Optional[Set[int]] = None):
     runAllTests(engine.AIHook, name, test_filter)
 
   elif engine_type == "openai":
-    from .AiEngineOpenAiChatGPT import OpenAIChatEngine
+    from .AiEngineOpenAiChatGPT import OpenAIEngine
     timeout = config.get("timeout") or API_TIMEOUT_OVERRIDE or 3600
-    engine = OpenAIChatEngine(config["base_model"], config["reasoning"], config["tools"],
-                              timeout=timeout)
+    engine = OpenAIEngine(config["base_model"],
+                          config["reasoning"],
+                          config["tools"],
+                          timeout=timeout)
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
   elif engine_type in ("azure-openai", "azure_openai"):
     from .AiEngineAzureOpenAI import AzureOpenAIEngine
     timeout = config.get("timeout") or API_TIMEOUT_OVERRIDE or 3600
-    engine = AzureOpenAIEngine(config["base_model"], config["reasoning"], config["tools"],
-                               config.get("endpoint"), config.get("api_version"),
+    engine = AzureOpenAIEngine(config["base_model"],
+                               config["reasoning"],
+                               config["tools"],
+                               config.get("endpoint"),
+                               config.get("api_version"),
                                timeout=timeout)
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
@@ -2192,7 +2199,9 @@ def run_model_config(config: dict, test_filter: Optional[Set[int]] = None):
   elif engine_type == "gemini":
     from .AiEngineGoogleGemini import GeminiEngine
     timeout = config.get("timeout") or API_TIMEOUT_OVERRIDE or 3600
-    engine = GeminiEngine(config["base_model"], config["reasoning"], config["tools"],
+    engine = GeminiEngine(config["base_model"],
+                          config["reasoning"],
+                          config["tools"],
                           timeout=timeout)
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
@@ -2200,15 +2209,16 @@ def run_model_config(config: dict, test_filter: Optional[Set[int]] = None):
   elif engine_type == "xai":
     from .AiEngineXAIGrok import GrokEngine
     timeout = config.get("timeout") or API_TIMEOUT_OVERRIDE or 3600
-    engine = GrokEngine(config["base_model"], config["reasoning"], config["tools"],
-                        timeout=timeout)
+    engine = GrokEngine(config["base_model"], config["reasoning"], config["tools"], timeout=timeout)
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
   elif engine_type == "anthropic":
     from .AiEngineAnthropicClaude import ClaudeEngine
     timeout = config.get("timeout") or API_TIMEOUT_OVERRIDE or 3600
-    engine = ClaudeEngine(config["base_model"], config["reasoning"], config["tools"],
+    engine = ClaudeEngine(config["base_model"],
+                          config["reasoning"],
+                          config["tools"],
                           timeout=timeout)
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
@@ -2216,8 +2226,11 @@ def run_model_config(config: dict, test_filter: Optional[Set[int]] = None):
   elif engine_type == "bedrock":
     from .AiEngineAmazonBedrock import BedrockEngine
     timeout = config.get("timeout") or API_TIMEOUT_OVERRIDE or 3600
-    engine = BedrockEngine(config["base_model"], config["reasoning"], config["tools"],
-                           config.get("region", "us-east-1"), timeout=timeout)
+    engine = BedrockEngine(config["base_model"],
+                           config["reasoning"],
+                           config["tools"],
+                           config.get("region", "us-east-1"),
+                           timeout=timeout)
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
@@ -2229,7 +2242,10 @@ def run_model_config(config: dict, test_filter: Optional[Set[int]] = None):
       return
     # Apply timeout override if provided
     timeout = config.get("timeout") or API_TIMEOUT_OVERRIDE or 3600
-    engine = LlamaCppEngine(config["base_model"], base_url, timeout=timeout, tools=config.get("tools", False))
+    engine = LlamaCppEngine(config["base_model"],
+                            base_url,
+                            timeout=timeout,
+                            tools=config.get("tools", False))
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
