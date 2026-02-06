@@ -24,6 +24,8 @@ IGNORE_CACHED_FAILURES = False
 ALL_MODEL_CONFIGS = []
 
 FORCE_ARG = False
+# Optional override for per-request API timeout (seconds)
+API_TIMEOUT_OVERRIDE: int | None = None
 
 # Global reference to current benchmark runner instance (set by subclass)
 _current_runner = None
@@ -546,6 +548,10 @@ Examples:
   parser.add_argument("--force",
                       action="store_true",
                       help="Bypass AI response cache (still saves new responses to cache)")
+  parser.add_argument("--api-timeout",
+                      type=int,
+                      default=None,
+                      help="Override per-request API timeout in seconds (e.g., llama.cpp)")
   parser.add_argument("--offline",
                       action="store_true",
                       help="Only use cached results. Do not make any API calls.")
@@ -609,6 +615,11 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
     from . import CacheLayer
     CacheLayer.OFFLINE_MODE = True
     print("Offline mode: No API calls will be made, cache only.")
+
+  if args.api_timeout is not None:
+    global API_TIMEOUT_OVERRIDE
+    API_TIMEOUT_OVERRIDE = args.api_timeout
+    print(f"API timeout override set to {API_TIMEOUT_OVERRIDE} seconds")
 
   if args.unskip:
     UNSKIP = True
@@ -2144,44 +2155,51 @@ def run_model_config(config: dict, test_filter: Optional[Set[int]] = None):
     runAllTests(engine.AIHook, name, test_filter)
 
   elif engine_type == "openai":
-    from .AiEngineOpenAiChatGPT import OpenAIEngine
-    engine = OpenAIEngine(config["base_model"], config["reasoning"], config["tools"])
+    from .AiEngineOpenAiChatGPT import OpenAIChatEngine
+    timeout = config.get("timeout") or API_TIMEOUT_OVERRIDE or 3600
+    engine = OpenAIChatEngine(config["base_model"], config["reasoning"], config["tools"],
+                              timeout=timeout)
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
-  elif engine_type == "azure_openai":
+  elif engine_type == "azure-openai":
     from .AiEngineAzureOpenAI import AzureOpenAIEngine
-    endpoint = config.get("endpoint") or os.environ.get("AZURE_OPENAI_ENDPOINT")
-    if not endpoint:
-      print(f"Skipping {name}: AZURE_OPENAI_ENDPOINT not set")
-      return
-    engine = AzureOpenAIEngine(config["base_model"], config["reasoning"], config["tools"], endpoint,
-                               config.get("api_version"))
+    timeout = config.get("timeout") or API_TIMEOUT_OVERRIDE or 3600
+    engine = AzureOpenAIEngine(config["base_model"], config["reasoning"], config["tools"],
+                               config.get("endpoint"), config.get("api_version"),
+                               timeout=timeout)
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
   elif engine_type == "gemini":
     from .AiEngineGoogleGemini import GeminiEngine
-    engine = GeminiEngine(config["base_model"], config["reasoning"], config["tools"])
+    timeout = config.get("timeout") or API_TIMEOUT_OVERRIDE or 3600
+    engine = GeminiEngine(config["base_model"], config["reasoning"], config["tools"],
+                          timeout=timeout)
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
   elif engine_type == "xai":
     from .AiEngineXAIGrok import GrokEngine
-    engine = GrokEngine(config["base_model"], config["reasoning"], config["tools"])
+    timeout = config.get("timeout") or API_TIMEOUT_OVERRIDE or 3600
+    engine = GrokEngine(config["base_model"], config["reasoning"], config["tools"],
+                        timeout=timeout)
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
   elif engine_type == "anthropic":
     from .AiEngineAnthropicClaude import ClaudeEngine
-    engine = ClaudeEngine(config["base_model"], config["reasoning"], config["tools"])
+    timeout = config.get("timeout") or API_TIMEOUT_OVERRIDE or 3600
+    engine = ClaudeEngine(config["base_model"], config["reasoning"], config["tools"],
+                          timeout=timeout)
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
   elif engine_type == "bedrock":
     from .AiEngineAmazonBedrock import BedrockEngine
+    timeout = config.get("timeout") or API_TIMEOUT_OVERRIDE or 3600
     engine = BedrockEngine(config["base_model"], config["reasoning"], config["tools"],
-                           config.get("region", "us-east-1"))
+                           config.get("region", "us-east-1"), timeout=timeout)
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
@@ -2191,7 +2209,9 @@ def run_model_config(config: dict, test_filter: Optional[Set[int]] = None):
     if not base_url:
       print(f"Skipping {name}: LLAMACPP_BASE_URL not set")
       return
-    engine = LlamaCppEngine(config["base_model"], base_url, tools=config.get("tools", False))
+    # Apply timeout override if provided
+    timeout = config.get("timeout") or API_TIMEOUT_OVERRIDE or 3600
+    engine = LlamaCppEngine(config["base_model"], base_url, timeout=timeout, tools=config.get("tools", False))
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 

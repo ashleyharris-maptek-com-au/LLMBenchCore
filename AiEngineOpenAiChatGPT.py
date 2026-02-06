@@ -38,19 +38,20 @@ class OpenAIEngine:
       - False: No tools available
       - True: Enable ALL built-in tools (web_search, code_interpreter)
       - List of function definitions: Enable specific custom tools
+  - timeout: Request timeout in seconds
   """
 
-  def __init__(self, model: str, reasoning=False, tools=False):
+  def __init__(self, model: str, reasoning=False, tools=False, timeout: int = 3600):
     self.model = model
     self.reasoning = reasoning
     self.tools = tools
+    self.timeout = timeout
     self.forcedFailure = False
-    self.configAndSettingsHash = hashlib.sha256(model.encode() + str(reasoning).encode() +
-                                                str(tools).encode()).hexdigest()
+    self.configAndSettingsHash = hashlib.sha256(model.encode() + str(reasoning).encode() + str(tools).encode() + str(timeout).encode()).hexdigest()
 
   def AIHook(self, prompt: str, structure: dict | None) -> tuple:
     """Call the OpenAI API with instance configuration."""
-    result = _openai_ai_hook(prompt, structure, self.model, self.reasoning, self.tools, self)
+    result = _openai_ai_hook(prompt, structure, self.model, self.reasoning, self.tools, self, timeout_override=self.timeout)
     return result
 
 
@@ -184,8 +185,8 @@ def build_openai_response_params(prompt: str,
   return response_params
 
 
-def _openai_ai_hook(prompt: str, structure: dict | None, model: str, reasoning, tools,
-                    engine_instance) -> tuple:
+def _openai_ai_hook(prompt: str, structure: dict | None, model: str, reasoning,
+                    tools, engine_instance, timeout_override: int | None = None) -> tuple:
   """
     This function is called by the test runner to get the AI's response to a prompt.
     
@@ -202,13 +203,14 @@ def _openai_ai_hook(prompt: str, structure: dict | None, model: str, reasoning, 
 
   try:
     # Initialize the client - it will automatically use OPENAI_API_KEY environment variable
-    client = OpenAI(timeout=3600)
+    timeout = timeout_override or 3600
+    client = OpenAI(timeout=timeout)
 
     # Build request parameters using shared helper
     response_params = build_openai_response_params(prompt, structure, model, reasoning, tools)
 
     # Make the API call using Responses API with streaming
-    stream = client.responses.create(stream=True, timeout=3600, **response_params)
+    stream = client.responses.create(stream=True, timeout=timeout, **response_params)
 
     chainOfThought = ""
     output_text = ""
@@ -289,7 +291,7 @@ def _openai_ai_hook(prompt: str, structure: dict | None, model: str, reasoning, 
       return "", ""
 
 
-def submit_batch(config: dict, requests: list) -> str | None:
+def submit_batch(config: dict, requests: list, timeout_override: int | None = None) -> str | None:
   """
   Submit a batch of requests to OpenAI's Batch API.
   
@@ -303,7 +305,7 @@ def submit_batch(config: dict, requests: list) -> str | None:
   from openai import OpenAI
   import tempfile
 
-  client = OpenAI(timeout=3600)
+  client = OpenAI(timeout=timeout_override or 3600)
   model = config.get("base_model", "gpt-4o")
   reasoning = config.get("reasoning", False)
   tools = config.get("tools", False)
@@ -341,7 +343,7 @@ def submit_batch(config: dict, requests: list) -> str | None:
   return batch.id
 
 
-def poll_batch(batch_id: str, requests: list) -> tuple:
+def poll_batch(batch_id: str, requests: list, timeout_override: int | None = None) -> tuple:
   """
   Poll an OpenAI batch for status and results.
   
@@ -356,7 +358,7 @@ def poll_batch(batch_id: str, requests: list) -> tuple:
   """
   from openai import OpenAI
 
-  client = OpenAI(timeout=3600)
+  client = OpenAI(timeout=timeout_override or 3600)
   batch_status = client.batches.retrieve(batch_id)
 
   results = []

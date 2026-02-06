@@ -75,21 +75,22 @@ class AzureOpenAIEngine:
   """
 
   def __init__(self, model: str, reasoning=False, tools=False, endpoint: str | None = None,
-               api_version: str | None = None):
+               api_version: str | None = None, timeout: int = 3600):
     self.model = model
     self.reasoning = reasoning
     self.tools = tools
     self.endpoint = endpoint
     self.api_version = api_version
+    self.timeout = timeout
     self.forcedFailure = False
     self.configAndSettingsHash = hashlib.sha256(
       model.encode() + str(reasoning).encode() + str(tools).encode() +
-      str(endpoint).encode() + str(api_version).encode()
+      str(endpoint).encode() + str(api_version).encode() + str(timeout).encode()
     ).hexdigest()
 
   def AIHook(self, prompt: str, structure: dict | None) -> tuple:
     result = _azure_openai_ai_hook(prompt, structure, self.model, self.reasoning, self.tools,
-                                   self.endpoint, self.api_version, self)
+                                   self.endpoint, self.api_version, self, timeout_override=self.timeout)
     return result
 
 
@@ -182,7 +183,7 @@ def _convert_tools(tools):
 
 def _azure_openai_ai_hook(prompt: str, structure: dict | None, model: str, reasoning, tools,
                           endpoint: str | None, api_version: str | None,
-                          engine_instance) -> tuple:
+                          engine_instance, timeout_override: int | None = None) -> tuple:
   if engine_instance.forcedFailure:
     return {"error": "Forced failure"}, "Forced failure due to API instability"
 
@@ -203,7 +204,7 @@ def _azure_openai_ai_hook(prompt: str, structure: dict | None, model: str, reaso
       api_version = os.environ.get("AZURE_OPENAI_API_VERSION") or "2025-04-01-preview"
 
     client = AzureOpenAI(azure_endpoint=endpoint, api_key=api_key, api_version=api_version,
-                         timeout=3600)
+                         timeout=timeout_override or engine_instance.timeout)
 
     # Azure uses deployment name for model
     model_to_use = model
@@ -271,7 +272,7 @@ def _azure_openai_ai_hook(prompt: str, structure: dict | None, model: str, reaso
     elif tools_converted:
       response_params["tools"] = tools_converted
 
-    stream = client.responses.create(stream=True, timeout=3600, **response_params)
+    stream = client.responses.create(stream=True, timeout=timeout_override or 3600, **response_params)
 
     chain_of_thought = ""
     output_text = ""

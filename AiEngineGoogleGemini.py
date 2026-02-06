@@ -28,7 +28,7 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, create_model
 
-TIMEOUT_SECONDS = 3600 * 3  # 3 hour timeout
+DEFAULT_TIMEOUT_SECONDS = 3600 * 3  # 3 hour timeout
 
 
 class GeminiEngine:
@@ -48,18 +48,21 @@ class GeminiEngine:
       - "code_execution": Enable Python code execution
       - List of functions: Enable custom function calling
       - List of strings/functions: Mix built-in and custom tools
+  - timeout: Request timeout in seconds
   """
 
-  def __init__(self, model: str, reasoning=False, tools=False):
+  def __init__(self, model: str, reasoning=False, tools=False, timeout: int = DEFAULT_TIMEOUT_SECONDS):
     self.model = model
     self.reasoning = reasoning
     self.tools = tools
+    self.timeout = timeout
     self.configAndSettingsHash = hashlib.sha256(model.encode() + str(reasoning).encode() +
-                                                str(tools).encode()).hexdigest()
+                                                str(tools).encode() + str(timeout).encode()).hexdigest()
 
   def AIHook(self, prompt: str, structure: dict | None) -> tuple:
     """Call the Gemini API with instance configuration."""
-    return _gemini_ai_hook(prompt, structure, self.model, self.reasoning, self.tools)
+    return _gemini_ai_hook(prompt, structure, self.model, self.reasoning, self.tools,
+                          timeout_override=self.timeout)
 
 
 def json_schema_to_pydantic(schema: dict, name: str = "DynamicModel") -> type[BaseModel]:
@@ -294,7 +297,7 @@ def build_gemini_config(structure: dict | None, reasoning, tools) -> dict:
 
 
 def _gemini_ai_hook(prompt: str, structure: dict | None, model: str, reasoning,
-                    tools) -> dict | str:
+                    tools, timeout_override: int | None = None) -> dict | str:
   """
     This function is called by the test runner to get the AI's response to a prompt.
     
@@ -342,17 +345,18 @@ def _gemini_ai_hook(prompt: str, structure: dict | None, model: str, reasoning,
 
     start_time = time.time()
     timed_out = False
+    timeout_seconds = timeout_override or DEFAULT_TIMEOUT_SECONDS
 
     while True:
       # Check total elapsed time
       elapsed = time.time() - start_time
-      if elapsed > TIMEOUT_SECONDS:
-        print(f"Timeout: Gemini API call exceeded {TIMEOUT_SECONDS} seconds")
+      if elapsed > timeout_seconds:
+        print(f"Timeout: Gemini API call exceeded {timeout_seconds} seconds")
         timed_out = True
         break
 
       # Wait for next chunk with timeout (check every 30 seconds)
-      remaining = TIMEOUT_SECONDS - elapsed
+      remaining = timeout_seconds - elapsed
       try:
         msg_type, payload = chunk_queue.get(timeout=min(30, remaining))
       except queue.Empty:

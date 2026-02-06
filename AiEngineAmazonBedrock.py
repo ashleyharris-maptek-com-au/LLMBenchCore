@@ -41,22 +41,24 @@ class BedrockEngine:
       - List of tool definitions: Enable specific custom tools
   - region: AWS Region for Bedrock (default "us-east-1")
   - flex_tier: Use Flex service tier for cost savings (default False)
+  - timeout: Request timeout in seconds
   """
 
-  def __init__(self, model: str, reasoning=False, tools=False, region="us-east-1", flex_tier=False):
+  def __init__(self, model: str, reasoning=False, tools=False, region="us-east-1", flex_tier=False, timeout: int = 3600):
     self.model = model
     self.reasoning = reasoning
     self.tools = tools
     self.region = region
     self.flex_tier = flex_tier
+    self.timeout = timeout
     self.forcedFailure = False
     self.configAndSettingsHash = hashlib.sha256(model.encode() + str(reasoning).encode() +
-                                                str(tools).encode()).hexdigest()
+                                                str(tools).encode() + str(timeout).encode()).hexdigest()
 
   def AIHook(self, prompt: str, structure: dict | None) -> tuple:
     """Call the Bedrock API with instance configuration."""
     return _bedrock_ai_hook(prompt, structure, self.model, self.reasoning, self.tools, self.region,
-                            self.flex_tier, self)
+                            self.flex_tier, self, timeout_override=self.timeout)
 
 
 def json_schema_to_pydantic(schema: dict, name: str = "DynamicModel") -> type[BaseModel]:
@@ -181,7 +183,7 @@ def build_bedrock_content(prompt: str) -> list[dict]:
 
 
 def _bedrock_ai_hook(prompt: str, structure: Optional[dict], model: str, reasoning, tools,
-                     region: str, flex_tier: bool, engine_instance) -> tuple:
+                     region: str, flex_tier: bool, engine_instance, timeout_override: int | None = None) -> tuple:
   """
     This function is called by the test runner to get the AI's response to a prompt.
     
@@ -200,7 +202,9 @@ def _bedrock_ai_hook(prompt: str, structure: Optional[dict], model: str, reasoni
 
   try:
     # Initialize the Bedrock runtime client
-    client = boto3.client(service_name='bedrock-runtime', region_name=region)
+    client = boto3.client(service_name='bedrock-runtime', region_name=region,
+                         config__read_timeout=timeout_override or 3600,
+                         config__connect_timeout=30)
 
     # Build content blocks
     content_blocks = build_bedrock_content(prompt)

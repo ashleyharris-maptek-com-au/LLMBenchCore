@@ -29,28 +29,29 @@ class GrokEngine:
   xAI Grok AI Engine class.
   
   Configuration parameters:
-  - model: Model name (e.g., "grok-3-mini")
-  - reasoning: Reasoning effort on a 0-10 scale:
-      - 0 or False: No reasoning (fastest)
-      - 1-3: Low reasoning effort
-      - 4-7: Medium reasoning effort
-      - 8-10: High reasoning effort
+  - model: Model name (e.g., "grok-3")
+  - reasoning: Reasoning mode:
+      - False or 0: No special reasoning (standard mode)
+      - "o1-preview": Use o1-preview model with extended reasoning
+      - "o1-mini": Use o1-mini model (faster reasoning)
+      - Integer (1-10): Reasoning effort level (for o1 models)
   - tools: Tool capabilities:
       - False: No tools available
-      - True: Enable built-in tools (web_search, x_search, code_execution)
+      - True: Enable ALL built-in tools (web_search, code_interpreter)
       - List of function definitions: Enable specific custom tools
+  - timeout: Request timeout in seconds
   """
 
-  def __init__(self, model: str, reasoning=False, tools=False):
+  def __init__(self, model: str, reasoning=False, tools=False, timeout: int = 3600):
     self.model = model
     self.reasoning = reasoning
     self.tools = tools
-    self.configAndSettingsHash = hashlib.sha256(model.encode() + str(reasoning).encode() +
-                                                str(tools).encode() + b"version2").hexdigest()
+    self.timeout = timeout
+    self.configAndSettingsHash = hashlib.sha256(model.encode() + str(reasoning).encode() + str(tools).encode() + str(timeout).encode()).hexdigest()
 
   def AIHook(self, prompt: str, structure: dict | None) -> tuple:
     """Call the Grok API with instance configuration."""
-    return _grok_ai_hook(prompt, structure, self.model, self.reasoning, self.tools)
+    return _grok_ai_hook(prompt, structure, self.model, self.reasoning, self.tools, timeout_override=self.timeout)
 
 
 def json_schema_to_pydantic(schema: dict, name: str = "DynamicModel") -> type[BaseModel]:
@@ -183,7 +184,7 @@ def build_xai_chat_params(model: str, tools) -> dict:
   return chat_params
 
 
-def _grok_ai_hook(prompt: str, structure: dict | None, model: str, reasoning, tools) -> tuple:
+def _grok_ai_hook(prompt: str, structure: dict | None, model: str, reasoning, tools, timeout_override: int | None = None) -> tuple:
   """
     This function is called by the test runner to get the AI's response to a prompt.
     
@@ -199,7 +200,7 @@ def _grok_ai_hook(prompt: str, structure: dict | None, model: str, reasoning, to
 
   try:
     # Initialize the client - uses XAI_API_KEY environment variable
-    client = Client(timeout=3600)
+    client = Client(timeout=timeout_override or 3600)
 
     # Build chat creation parameters using shared helper
     chat_params = build_xai_chat_params(model, tools)
