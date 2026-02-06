@@ -50,6 +50,10 @@ from .ResultPaths import (
   reset_current_model,
   get_current_model,
 )
+from .ArtifactStore import (
+  ArtifactStore,
+  ModelArtifactStore,
+)
 from .CadArtifacts import (
   CadArtifactStore,
   write_if_changed,
@@ -91,6 +95,8 @@ __all__ = [
   'set_current_model',
   'reset_current_model',
   'get_current_model',
+  'ArtifactStore',
+  'ModelArtifactStore',
   'CadArtifactStore',
   'write_if_changed',
 ]
