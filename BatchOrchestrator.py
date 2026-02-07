@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from . import ResultPaths as rp
+from ._prompt_utils import apply_prompt_prefix, resolve_prompt_prefix
 
 # Import CacheLayer as a module (avoid package attribute that may resolve to the class)
 CacheModule = importlib.import_module("LLMBenchCore.CacheLayer")
@@ -60,6 +61,7 @@ class BatchResult:
   success: bool
   result: Any  # The actual response (text or dict)
   chain_of_thought: str = ""
+  meta: Optional[dict] = None
   error: Optional[str] = None
 
 
@@ -151,8 +153,11 @@ class BatchOrchestrator:
     return CacheModule.write_to_cache(request.prompt, request.structure, request.config_hash,
                                       result)
 
-  def write_result_to_prompt_cache(self, request: BatchRequest, result: Any,
-                                   chain_of_thought: str) -> None:
+  def write_result_to_prompt_cache(self,
+                                   request: BatchRequest,
+                                   result: Any,
+                                   chain_of_thought: str,
+                                   meta: Optional[dict] = None) -> None:
     """Write result to the prompt/raw/cot cache files (like CacheLayer does)."""
     rp.ensure_global_result_dirs()
     rp.ensure_model_dirs(request.engine_name)
@@ -160,6 +165,7 @@ class BatchOrchestrator:
     raw_file = rp.model_raw_path(request.engine_name, request.test_index, request.sub_pass)
     prompt_file = rp.model_prompt_path(request.engine_name, request.test_index, request.sub_pass)
     cot_file = rp.model_cot_path(request.engine_name, request.test_index, request.sub_pass)
+    meta_file = rp.model_meta_path(request.engine_name, request.test_index, request.sub_pass)
 
     with open(raw_file, "w", encoding="utf-8") as f:
       f.write(str(result))
@@ -167,6 +173,11 @@ class BatchOrchestrator:
       f.write(str(request.prompt))
     with open(cot_file, "w", encoding="utf-8") as f:
       f.write(str(chain_of_thought))
+    if isinstance(meta, dict):
+      with open(meta_file, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+    elif os.path.exists(meta_file):
+      os.remove(meta_file)
 
   def submit_batches(self) -> Dict[str, str]:
     """
@@ -278,6 +289,7 @@ class BatchOrchestrator:
                           success=r["success"],
                           result=r["result"],
                           chain_of_thought=r.get("chain_of_thought", ""),
+                          meta=r.get("meta"),
                           error=r.get("error")) for r in results_list
             ]
 
@@ -290,9 +302,13 @@ class BatchOrchestrator:
                 if req.custom_id == result.custom_id:
                   if result.success:
                     # Write as tuple (result, chain_of_thought) to match sync API cache format
-                    cache_value = (result.result, result.chain_of_thought or "")
+                    if isinstance(result.meta, dict):
+                      cache_value = (result.result, result.chain_of_thought or "", result.meta)
+                    else:
+                      cache_value = (result.result, result.chain_of_thought or "")
                     self.write_result_to_cache(req, cache_value)
-                    self.write_result_to_prompt_cache(req, result.result, result.chain_of_thought)
+                    self.write_result_to_prompt_cache(req, result.result, result.chain_of_thought,
+                                                      result.meta)
                     print(f"[Batch] Cached result for {result.custom_id}")
                   break
 
@@ -531,6 +547,7 @@ def gather_all_prompts(orchestrator: BatchOrchestrator,
     # Add prompts for each engine
     for config in configs:
       engine_name = config["name"]
+      prompt_prefix = resolve_prompt_prefix(config)
 
       # Create engine to get config hash
       engine = create_engine_instance(config)
@@ -543,8 +560,9 @@ def gather_all_prompts(orchestrator: BatchOrchestrator,
       prompts_to_add = prompts[:early_fail_count] if early_fail else prompts
 
       for sub_pass, prompt in enumerate(prompts_to_add):
+        effective_prompt = apply_prompt_prefix(str(prompt), prompt_prefix)
         request = BatchRequest(custom_id=f"{engine_name}_{test_index}_{sub_pass}",
-                               prompt=prompt,
+                               prompt=effective_prompt,
                                structure=structure,
                                test_index=test_index,
                                sub_pass=sub_pass,
@@ -582,6 +600,7 @@ def handle_early_fail_follow_ups(orchestrator: BatchOrchestrator,
 
     for config in configs:
       engine_name = config["name"]
+      prompt_prefix = resolve_prompt_prefix(config)
 
       # Check if initial results passed the threshold
       # Read the cached results for initial subpasses
@@ -636,8 +655,9 @@ def handle_early_fail_follow_ups(orchestrator: BatchOrchestrator,
           config_hash = engine.configAndSettingsHash
 
           for sub_pass in range(initial_count, len(all_prompts)):
+            effective_prompt = apply_prompt_prefix(str(all_prompts[sub_pass]), prompt_prefix)
             request = BatchRequest(custom_id=f"{engine_name}_{test_index}_{sub_pass}",
-                                   prompt=all_prompts[sub_pass],
+                                   prompt=effective_prompt,
                                    structure=structure,
                                    test_index=test_index,
                                    sub_pass=sub_pass,
@@ -665,7 +685,10 @@ def create_engine_instance(config: Dict):
   if engine_type == "openai":
     from .AiEngineOpenAiChatGPT import OpenAIEngine
     return OpenAIEngine(config["base_model"], config.get("reasoning", False),
-                        config.get("tools", False))
+                        config.get("tools", False),
+                        max_output_tokens=config.get("max_output_tokens"),
+                        temperature=config.get("temperature"),
+                        emit_meta=True)
   elif engine_type == "anthropic":
     from .AiEngineAnthropicClaude import ClaudeEngine
     return ClaudeEngine(config["base_model"], config.get("reasoning", False),
@@ -686,7 +709,10 @@ def create_engine_instance(config: Dict):
     from .AiEngineAzureOpenAI import AzureOpenAIEngine
     return AzureOpenAIEngine(config["base_model"], config.get("reasoning", False),
                              config.get("tools", False), config.get("endpoint"),
-                             config.get("api_version"))
+                             config.get("api_version"),
+                             max_output_tokens=config.get("max_output_tokens"),
+                             temperature=config.get("temperature"),
+                             emit_meta=True)
   elif engine_type == "llamacpp":
     from .AiEngineLlamaCpp import LlamaCppEngine
     return LlamaCppEngine(config.get("base_url", "http://localhost:8080"))
