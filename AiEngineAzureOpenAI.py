@@ -18,6 +18,7 @@ import time
 from urllib.parse import parse_qs, urlparse
 
 from . import PromptImageTagging as pit
+from ._engine_utils import extract_usage_meta
 
 
 def _normalize_azure_endpoint(endpoint: str, api_version: str | None) -> tuple[str, str | None]:
@@ -87,25 +88,39 @@ class AzureOpenAIEngine:
   - tools: False/True/custom tools list
   - endpoint: Azure OpenAI resource endpoint (or full responses URL)
   - api_version: Azure OpenAI api-version string
+  - emit_meta: When True, returns (result, chain_of_thought, meta).
+      Defaults to False for backward-compatible (result, chain_of_thought).
   """
 
   def __init__(self, model: str, reasoning=False, tools=False, endpoint: str | None = None,
-               api_version: str | None = None, timeout: int = 3600):
+               api_version: str | None = None, timeout: int = 3600,
+               max_output_tokens: int | None = None, temperature: float | None = None,
+               emit_meta: bool = False):
     self.model = model
     self.reasoning = reasoning
     self.tools = tools
     self.endpoint = endpoint
     self.api_version = api_version
     self.timeout = timeout
+    self.max_output_tokens = max_output_tokens
+    self.temperature = temperature
+    self.emit_meta = emit_meta
     self.forcedFailure = False
     self.configAndSettingsHash = hashlib.sha256(
       model.encode() + str(reasoning).encode() + str(tools).encode() +
-      str(endpoint).encode() + str(api_version).encode() + str(timeout).encode()
+      str(endpoint).encode() + str(api_version).encode() + str(timeout).encode() +
+      str(max_output_tokens).encode() + str(temperature).encode() + str(emit_meta).encode()
     ).hexdigest()
 
   def AIHook(self, prompt: str, structure: dict | None) -> tuple:
     result = _azure_openai_ai_hook(prompt, structure, self.model, self.reasoning, self.tools,
-                                   self.endpoint, self.api_version, self, timeout_override=self.timeout)
+                                   self.endpoint, self.api_version, self,
+                                   timeout_override=self.timeout,
+                                   max_output_tokens=self.max_output_tokens,
+                                   temperature=self.temperature)
+    # Keep legacy return shape unless metadata is explicitly requested.
+    if not self.emit_meta and isinstance(result, tuple) and len(result) >= 2:
+      return result[0], result[1]
     return result
 
 
@@ -198,7 +213,9 @@ def _convert_tools(tools):
 
 def _azure_openai_ai_hook(prompt: str, structure: dict | None, model: str, reasoning, tools,
                           endpoint: str | None, api_version: str | None,
-                          engine_instance, timeout_override: int | None = None) -> tuple:
+                          engine_instance, timeout_override: int | None = None,
+                          max_output_tokens: int | None = None,
+                          temperature: float | None = None) -> tuple:
   if engine_instance.forcedFailure:
     return {"error": "Forced failure"}, "Forced failure due to API instability"
 
@@ -232,6 +249,10 @@ def _azure_openai_ai_hook(prompt: str, structure: dict | None, model: str, reaso
     if not _supports_responses(api_version):
       messages = _build_chat_messages(prompt)
       chat_params = {"model": model_to_use, "messages": messages}
+      if max_output_tokens is not None:
+        chat_params["max_completion_tokens"] = int(max_output_tokens)
+      if temperature is not None:
+        chat_params["temperature"] = float(temperature)
 
       if structure is not None:
         schema = _sanitize_schema_for_azure(structure)
@@ -250,11 +271,12 @@ def _azure_openai_ai_hook(prompt: str, structure: dict | None, model: str, reaso
       response = client.chat.completions.create(**chat_params)
       output_text = response.choices[0].message.content if response.choices else ""
       last_output_text = output_text
+      meta = extract_usage_meta(response, "azure_openai")
 
       if structure is not None:
         if output_text:
           try:
-            return json.loads(output_text), ""
+            return json.loads(output_text), "", meta
           except json.JSONDecodeError as parse_error:
             print(
               f"Warning: Failed to parse Azure structured JSON, attempting json_repair: {parse_error}"
@@ -262,16 +284,20 @@ def _azure_openai_ai_hook(prompt: str, structure: dict | None, model: str, reaso
             try:
               import json_repair
               repaired = json_repair.repair_json(output_text)
-              return json.loads(repaired), ""
+              return json.loads(repaired), "", meta
             except Exception as repair_error:
               print(f"Warning: Failed to repair Azure structured JSON response: {repair_error}")
-        return {}, ""
+        return {}, "", meta
       else:
-        return output_text or "", ""
+        return output_text or "", "", meta
 
     input_value = _build_openai_input(prompt)
 
     response_params = {"model": model_to_use, "input": input_value}
+    if max_output_tokens is not None:
+      response_params["max_output_tokens"] = int(max_output_tokens)
+    if temperature is not None:
+      response_params["temperature"] = float(temperature)
 
     reasoning_effort = _map_azure_reasoning_effort(reasoning)
     if reasoning_effort:
@@ -300,6 +326,7 @@ def _azure_openai_ai_hook(prompt: str, structure: dict | None, model: str, reaso
     chain_of_thought = ""
     output_text = ""
     current_reasoning_line = ""
+    completed_response = None
 
     for event in stream:
       event_type = event.type
@@ -322,15 +349,16 @@ def _azure_openai_ai_hook(prompt: str, structure: dict | None, model: str, reaso
         output_text += event.delta
 
       elif event_type == "response.completed":
-        pass
+        completed_response = getattr(event, "response", None)
 
     chain_of_thought = chain_of_thought.rstrip("\n")
     last_output_text = output_text
+    meta = extract_usage_meta(completed_response, "azure_openai")
 
     if structure is not None:
       if output_text:
         try:
-          return json.loads(output_text), chain_of_thought
+          return json.loads(output_text), chain_of_thought, meta
         except json.JSONDecodeError as parse_error:
           print(
             f"Warning: Failed to parse Azure structured JSON, attempting json_repair: {parse_error}"
@@ -338,12 +366,12 @@ def _azure_openai_ai_hook(prompt: str, structure: dict | None, model: str, reaso
           try:
             import json_repair
             repaired = json_repair.repair_json(output_text)
-            return json.loads(repaired), chain_of_thought
+            return json.loads(repaired), chain_of_thought, meta
           except Exception as repair_error:
             print(f"Warning: Failed to repair Azure structured JSON response: {repair_error}")
-      return {}, chain_of_thought
+      return {}, chain_of_thought, meta
     else:
-      return output_text or "", chain_of_thought
+      return output_text or "", chain_of_thought, meta
 
   except json.JSONDecodeError:
     print("Unexpected JSON decode error in Azure OpenAI engine.")
