@@ -55,6 +55,9 @@ from .ArtifactStore import (
   ModelArtifactStore,
   write_if_changed,
 )
+from .Concurrency import (
+  parallel_map,
+)
 
 __all__ = [
   'BenchmarkRunner',
@@ -95,4 +98,5 @@ __all__ = [
   'ArtifactStore',
   'ModelArtifactStore',
   'write_if_changed',
+  'parallel_map',
 ]
