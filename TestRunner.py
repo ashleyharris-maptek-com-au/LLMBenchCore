@@ -11,11 +11,14 @@ import hashlib
 import html
 import time
 import argparse
+import datetime
+import json
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from filelock import FileLock
 from .CacheLayer import CacheLayer as cl
 from . import ResultPaths as rp
+from ._prompt_utils import apply_prompt_prefix, resolve_prompt_prefix
 
 global UNSKIP
 UNSKIP = False
@@ -37,6 +40,39 @@ def is_placebo_model(model_name: str) -> bool:
     if cfg.get("name") == model_name:
       return cfg.get("engine") == "placebo"
   return False
+
+
+def get_model_config_by_name(model_name: str) -> Optional[Dict[str, Any]]:
+  for cfg in ALL_MODEL_CONFIGS:
+    if cfg.get("name") == model_name:
+      return cfg
+  return None
+
+
+def _normalize_hook_response(raw_response: Any) -> tuple[Any, str, Optional[dict]]:
+  result = raw_response
+  chain_of_thought = ""
+  meta = None
+
+  if isinstance(raw_response, (tuple, list)):
+    if len(raw_response) >= 1:
+      result = raw_response[0]
+    if len(raw_response) >= 2:
+      chain_of_thought = raw_response[1]
+    if len(raw_response) >= 3 and isinstance(raw_response[2], dict):
+      meta = raw_response[2]
+
+  if chain_of_thought is None:
+    chain_of_thought = ""
+  return result, str(chain_of_thought), meta
+
+
+def _json_safe(value: Any) -> Any:
+  # Ensure metadata is JSON-serializable before writing model meta artifacts.
+  try:
+    return json.loads(json.dumps(value, default=str))
+  except Exception:
+    return {"value": str(value)}
 
 
 class BenchmarkRunner(ABC):
@@ -908,6 +944,9 @@ def runTest(index: int,
 
   prompts = []
   structure = g["structure"]
+  model_config = get_model_config_by_name(aiEngineName) or {}
+  prompt_prefix = resolve_prompt_prefix(model_config)
+  subpass_meta: Dict[int, dict] = {}
 
   if "prepareSubpassPrompt" in g:
     # get the prompt and structure from the globals:
@@ -923,9 +962,20 @@ def runTest(index: int,
 
   # Helper to run a single prompt and save results
   def run_single_prompt(idx, prompt):
+    effective_prompt = apply_prompt_prefix(str(prompt), prompt_prefix)
+
     # Check saved prompt cache first (before CacheLayer)
-    cached_result = checkSavedPromptCache(aiEngineName, index, idx, prompt)
+    cached_result = checkSavedPromptCache(aiEngineName, index, idx, effective_prompt)
     if cached_result is not None:
+      meta_path = rp.model_meta_path(aiEngineName, index, idx)
+      if os.path.exists(meta_path):
+        try:
+          with open(meta_path, "r", encoding="utf-8") as f:
+            loaded_meta = json.load(f)
+            if isinstance(loaded_meta, dict):
+              subpass_meta[idx] = loaded_meta
+        except Exception as e:
+          print("Failed to load saved metadata for subpass " + str(idx) + " - " + str(e))
       if structure is None:
         return cached_result
       if structure is not None:
@@ -933,15 +983,18 @@ def runTest(index: int,
           return cached_result
 
     try:
-      r = aiEngineHook(prompt, structure, index, idx)
+      r = aiEngineHook(effective_prompt, structure, index, idx)
       if not isinstance(r, (tuple, list)):
         print("The following result from the AI engine is about to fail:")
         print(r)
-      result, chainOfThought = r
+      result, chainOfThought, meta = _normalize_hook_response(r)
+      if meta is not None:
+        subpass_meta[idx] = _json_safe(meta)
     except Exception as e:
       print("Failed to get result for subpass " + str(idx) + " - " + str(e))
       result = {"__exception": str(e)}
       chainOfThought = "Exception was thrown: " + str(e)
+      subpass_meta.pop(idx, None)
 
     try:
       open(rp.model_raw_path(aiEngineName, index, idx), "w", encoding="utf-8").write(str(result))
@@ -950,7 +1003,7 @@ def runTest(index: int,
 
     try:
       open(rp.model_prompt_path(aiEngineName, index, idx), "w",
-           encoding="utf-8").write(str(prompts[idx]))
+           encoding="utf-8").write(str(effective_prompt))
     except Exception as e:
       print("Failed to save prompt for subpass " + str(idx) + " - " + str(e))
 
@@ -959,6 +1012,19 @@ def runTest(index: int,
            encoding="utf-8").write(str(chainOfThought))
     except Exception as e:
       print("Failed to save chain of thought for subpass " + str(idx) + " - " + str(e))
+
+    meta_path = rp.model_meta_path(aiEngineName, index, idx)
+    if idx in subpass_meta:
+      try:
+        with open(meta_path, "w", encoding="utf-8") as f:
+          json.dump(subpass_meta[idx], f, indent=2)
+      except Exception as e:
+        print("Failed to save metadata for subpass " + str(idx) + " - " + str(e))
+    elif os.path.exists(meta_path):
+      try:
+        os.remove(meta_path)
+      except Exception:
+        pass
 
     return result
 
@@ -1100,6 +1166,13 @@ def runTest(index: int,
             subPass) + " - " + str(e)
       else:
         subpass_data["output_text"] = result
+
+    if subPass in subpass_meta:
+      meta = subpass_meta[subPass]
+      subpass_data["meta"] = meta
+      usage = meta.get("usage") if isinstance(meta, dict) else None
+      if isinstance(usage, dict):
+        subpass_data["usage"] = usage
 
     subpass_data["endProcessingTime"] = time.time()
 
@@ -1273,6 +1346,7 @@ def runAllTests(aiEngineHook: callable,
   rp.ensure_global_result_dirs()
   rp.ensure_model_dirs(aiEngineName)
   current_model_token = rp.set_current_model(aiEngineName)
+  model_config = get_model_config_by_name(aiEngineName) or {}
 
   # Create a results file for the html results of this engines test run
   resultFilePath = rp.model_report_path(aiEngineName) if test_filter is None else os.path.join(
@@ -1423,6 +1497,7 @@ window.VizManager = (function() {
   overall_total_score = 0
   overall_max_score = 0
   per_question_scores = {}  # {question_num: {"title": str, "score": float, "max": int}}
+  run_summary_tests = []
 
   longestProcessor = (None, None), 0
 
@@ -1478,6 +1553,30 @@ window.VizManager = (function() {
           "max": max_score,
           "subtasks": subtask_scores
         }
+
+        run_subpasses = []
+        for subpass in test_result['subpass_results']:
+          entry = {
+            "subpass": subpass.get("subpass"),
+            "score": subpass.get("score"),
+            "scoreExplanation": subpass.get("scoreExplanation"),
+          }
+          usage = subpass.get("usage")
+          if isinstance(usage, dict):
+            entry["usage"] = usage
+          meta = subpass.get("meta")
+          if isinstance(meta, dict):
+            entry["meta"] = meta
+          run_subpasses.append(entry)
+
+        run_summary_tests.append({
+          "test_index": current_test_index,
+          "title": question_title,
+          "score": test_result['total_score'],
+          "max_score": max_score,
+          "subpass_count": test_result['subpass_count'],
+          "subpasses": run_subpasses,
+        })
 
     except StopIteration:
       break
@@ -1814,6 +1913,35 @@ window.VizManager = (function() {
 
     with open(per_question_file, "w", encoding="utf-8") as f:
       json.dump(all_per_question, f, indent=2)
+
+  run_context = {
+    "engine": model_config.get("engine"),
+    "base_model": model_config.get("base_model"),
+    "reasoning": model_config.get("reasoning"),
+    "tools": model_config.get("tools"),
+    "max_output_tokens": model_config.get("max_output_tokens"),
+    "prompt_prefix": model_config.get("prompt_prefix"),
+    "temperature": model_config.get("temperature"),
+    "experiment_tag": model_config.get("experiment_tag"),
+  }
+  run_summary = {
+    "model_name": aiEngineName,
+    "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "run_context": run_context,
+    "overall": {
+      "total_score": overall_total_score,
+      "max_score": overall_max_score,
+      "accuracy": overall_total_score / overall_max_score if overall_max_score > 0 else 0.0,
+      "percentage": (overall_total_score / overall_max_score * 100.0)
+      if overall_max_score > 0 else 0.0,
+    },
+    "tests": run_summary_tests,
+  }
+  try:
+    with open(rp.model_run_summary_path(aiEngineName), "w", encoding="utf-8") as f:
+      json.dump(run_summary, f, indent=2, default=str)
+  except Exception as e:
+    print(f"Failed to write run summary for {aiEngineName}: {e}")
 
   if test_filter is not None:
     return
@@ -2297,6 +2425,12 @@ def run_model_config(config: dict, test_filter: Optional[Dict[int, Optional[Set[
   """Run tests for a single model configuration."""
   name = config["name"]
   engine_type = config["engine"]
+  existing_index = next((i for i, cfg in enumerate(ALL_MODEL_CONFIGS) if cfg.get("name") == name),
+                        None)
+  if existing_index is None:
+    ALL_MODEL_CONFIGS.append(config)
+  else:
+    ALL_MODEL_CONFIGS[existing_index] = config
 
   # Check if required API key is available
   env_key = config.get("env_key")
@@ -2316,7 +2450,11 @@ def run_model_config(config: dict, test_filter: Optional[Dict[int, Optional[Set[
     engine = OpenAIEngine(config["base_model"],
                           config["reasoning"],
                           config["tools"],
-                          timeout=timeout)
+                          timeout=timeout,
+                          max_output_tokens=config.get("max_output_tokens"),
+                          temperature=config.get("temperature"),
+                          # Runner path consumes metadata for run_summary/meta artifacts.
+                          emit_meta=True)
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
@@ -2328,7 +2466,11 @@ def run_model_config(config: dict, test_filter: Optional[Dict[int, Optional[Set[
                                config["tools"],
                                config.get("endpoint"),
                                config.get("api_version"),
-                               timeout=timeout)
+                               timeout=timeout,
+                               max_output_tokens=config.get("max_output_tokens"),
+                               temperature=config.get("temperature"),
+                               # Runner path consumes metadata for run_summary/meta artifacts.
+                               emit_meta=True)
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
