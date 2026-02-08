@@ -23,6 +23,7 @@ from ._prompt_utils import apply_prompt_prefix, resolve_prompt_prefix
 global UNSKIP
 UNSKIP = False
 IGNORE_CACHED_FAILURES = False
+PROPAGATE_UPWARDS = True
 
 # Global to track model configs for perfect score propagation
 ALL_MODEL_CONFIGS = []
@@ -600,6 +601,9 @@ Examples:
   parser.add_argument("--ignore-cached-failures",
                       action="store_true",
                       help="Ignore cached empty/error results")
+  parser.add_argument("--no-propagate-upwards",
+                      action="store_true",
+                      help="Disable perfect-score result propagation to higher-grade models.")
   parser.add_argument("--setup",
                       action="store_true",
                       help="Download and build all reference data without running tests.")
@@ -627,7 +631,7 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
       runner: The BenchmarkRunner instance
       script_file: The script file path (for --parallel mode), defaults to __file__ of caller
   """
-  global UNSKIP, IGNORE_CACHED_FAILURES, FORCE_ARG
+  global UNSKIP, IGNORE_CACHED_FAILURES, FORCE_ARG, PROPAGATE_UPWARDS
   import sys
 
   if script_file is None:
@@ -650,6 +654,10 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
     CacheLayer.FORCE_REFRESH = True
     FORCE_ARG = True
     print("Force mode: AI response cache will be bypassed (new responses still cached)")
+
+  if args.no_propagate_upwards:
+    PROPAGATE_UPWARDS = False
+    print("Perfect-score propagation disabled for this run.")
 
   if args.offline:
     from . import CacheLayer
@@ -848,6 +856,9 @@ def propogateUpwardsHack(aiEngineName: str, index: int, subPass: int, score: flo
   Same company = same prefix before '-' in model name.
   Higher grade = appears later in ALL_MODEL_CONFIGS list.
   """
+  if not PROPAGATE_UPWARDS:
+    return
+
   if score != 1.0:
     return
 
