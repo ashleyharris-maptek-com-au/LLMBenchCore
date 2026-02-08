@@ -37,6 +37,10 @@ def model_cot_dir(model_name: str) -> str:
   return os.path.join(model_root(model_name), "cot")
 
 
+def model_meta_dir(model_name: str) -> str:
+  return os.path.join(model_root(model_name), "meta")
+
+
 def model_artifact_dir(model_name: str | None = None) -> str:
   resolved = model_name if model_name is not None else get_current_model()
   if resolved is None:
@@ -46,6 +50,10 @@ def model_artifact_dir(model_name: str | None = None) -> str:
 
 def model_report_path(model_name: str) -> str:
   return os.path.join(model_root(model_name), "report.html")
+
+
+def model_run_summary_path(model_name: str) -> str:
+  return os.path.join(model_root(model_name), "run_summary.json")
 
 
 def model_report_href(model_name: str) -> str:
@@ -75,6 +83,11 @@ def model_cot_path(model_name: str, question_index: int, subpass: int) -> str:
                                                                        subpass))
 
 
+def model_meta_path(model_name: str, question_index: int, subpass: int) -> str:
+  filename = f"{model_name}_{question_index}_{subpass}.json"
+  return os.path.join(model_meta_dir(model_name), filename)
+
+
 def legacy_raw_path(model_name: str, question_index: int, subpass: int) -> str:
   return os.path.join(RESULTS_RAW_DIR, prompt_cache_filename(model_name, question_index, subpass))
 
@@ -92,6 +105,7 @@ def ensure_model_dirs(model_name: str) -> None:
   os.makedirs(model_raw_dir(model_name), exist_ok=True)
   os.makedirs(model_prompt_dir(model_name), exist_ok=True)
   os.makedirs(model_cot_dir(model_name), exist_ok=True)
+  os.makedirs(model_meta_dir(model_name), exist_ok=True)
   os.makedirs(model_artifact_dir(model_name), exist_ok=True)
 
 

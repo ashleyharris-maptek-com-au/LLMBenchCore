@@ -21,6 +21,7 @@ import json
 import random
 import time
 from . import PromptImageTagging as pit
+from ._openai_usage_utils import extract_openai_usage_meta
 
 
 class OpenAIEngine:
@@ -39,19 +40,47 @@ class OpenAIEngine:
       - True: Enable ALL built-in tools (web_search, code_interpreter)
       - List of function definitions: Enable specific custom tools
   - timeout: Request timeout in seconds
+  - emit_meta: When True, returns (result, chainOfThought, meta).
+      Defaults to False for backward-compatible (result, chainOfThought).
   """
 
-  def __init__(self, model: str, reasoning=False, tools=False, timeout: int = 3600):
+  def __init__(self,
+               model: str,
+               reasoning=False,
+               tools=False,
+               timeout: int = 3600,
+               max_output_tokens: int | None = None,
+               temperature: float | None = None,
+               emit_meta: bool = False):
     self.model = model
     self.reasoning = reasoning
     self.tools = tools
     self.timeout = timeout
+    self.max_output_tokens = max_output_tokens
+    self.temperature = temperature
+    self.emit_meta = emit_meta
     self.forcedFailure = False
-    self.configAndSettingsHash = hashlib.sha256(model.encode() + str(reasoning).encode() + str(tools).encode() + str(timeout).encode()).hexdigest()
+    normalized_max_output_tokens = "" if max_output_tokens is None else str(max_output_tokens)
+    normalized_temperature = "" if temperature is None else str(temperature)
+    self.configAndSettingsHash = hashlib.sha256(model.encode() + str(reasoning).encode() +
+                                                str(tools).encode() + str(timeout).encode() +
+                                                normalized_max_output_tokens.encode() +
+                                                normalized_temperature.encode()).hexdigest()
 
   def AIHook(self, prompt: str, structure: dict | None) -> tuple:
     """Call the OpenAI API with instance configuration."""
-    result = _openai_ai_hook(prompt, structure, self.model, self.reasoning, self.tools, self, timeout_override=self.timeout)
+    result = _openai_ai_hook(prompt,
+                             structure,
+                             self.model,
+                             self.reasoning,
+                             self.tools,
+                             self,
+                             timeout_override=self.timeout,
+                             max_output_tokens=self.max_output_tokens,
+                             temperature=self.temperature)
+    # Keep legacy return shape unless metadata is explicitly requested.
+    if not self.emit_meta and isinstance(result, tuple) and len(result) >= 2:
+      return result[0], result[1]
     return result
 
 
@@ -81,6 +110,8 @@ def build_openai_response_params(prompt: str,
                                  model: str,
                                  reasoning,
                                  tools,
+                                 max_output_tokens: int | None = None,
+                                 temperature: float | None = None,
                                  flex_banned=True) -> dict:
   """
   Build the parameters for an OpenAI Responses API call.
@@ -115,6 +146,12 @@ def build_openai_response_params(prompt: str,
       response_params["reasoning"] = {"effort": "high"}
 
     response_params["reasoning"]["summary"] = "auto"
+
+  if max_output_tokens is not None:
+    response_params["max_output_tokens"] = int(max_output_tokens)
+
+  if temperature is not None:
+    response_params["temperature"] = float(temperature)
 
   # Handle structured output using the text.format parameter
   if structure is not None:
@@ -186,7 +223,9 @@ def build_openai_response_params(prompt: str,
 
 
 def _openai_ai_hook(prompt: str, structure: dict | None, model: str, reasoning,
-                    tools, engine_instance, timeout_override: int | None = None) -> tuple:
+                    tools, engine_instance, timeout_override: int | None = None,
+                    max_output_tokens: int | None = None,
+                    temperature: float | None = None) -> tuple:
   """
     This function is called by the test runner to get the AI's response to a prompt.
     
@@ -207,7 +246,13 @@ def _openai_ai_hook(prompt: str, structure: dict | None, model: str, reasoning,
     client = OpenAI(timeout=timeout)
 
     # Build request parameters using shared helper
-    response_params = build_openai_response_params(prompt, structure, model, reasoning, tools)
+    response_params = build_openai_response_params(prompt,
+                                                   structure,
+                                                   model,
+                                                   reasoning,
+                                                   tools,
+                                                   max_output_tokens=max_output_tokens,
+                                                   temperature=temperature)
 
     # Make the API call using Responses API with streaming
     stream = client.responses.create(stream=True, timeout=timeout, **response_params)
@@ -215,6 +260,7 @@ def _openai_ai_hook(prompt: str, structure: dict | None, model: str, reasoning,
     chainOfThought = ""
     output_text = ""
     current_reasoning_line = ""
+    completed_response = None
 
     # Process streaming events
     for event in stream:
@@ -243,11 +289,11 @@ def _openai_ai_hook(prompt: str, structure: dict | None, model: str, reasoning,
 
       # Handle completion
       elif event_type == "response.completed":
-        # Final response is available if needed
-        pass
+        completed_response = getattr(event, "response", None)
 
     # Strip trailing newline from chain of thought if present
     chainOfThought = chainOfThought.rstrip("\n")
+    meta = extract_openai_usage_meta(completed_response, "openai")
 
     #print(output_text)
 
@@ -255,11 +301,11 @@ def _openai_ai_hook(prompt: str, structure: dict | None, model: str, reasoning,
     if structure is not None:
       # Parse JSON response
       if output_text:
-        return json.loads(output_text), chainOfThought
-      return {}, chainOfThought
+        return json.loads(output_text), chainOfThought, meta
+      return {}, chainOfThought, meta
     else:
       # Return text response
-      return output_text or "", chainOfThought
+      return output_text or "", chainOfThought, meta
 
   except json.JSONDecodeError:
     print(
@@ -309,6 +355,8 @@ def submit_batch(config: dict, requests: list, timeout_override: int | None = No
   model = config.get("base_model", "gpt-4o")
   reasoning = config.get("reasoning", False)
   tools = config.get("tools", False)
+  max_output_tokens = config.get("max_output_tokens")
+  temperature = config.get("temperature")
 
   # Build JSONL content using the shared helper
   jsonl_lines = []
@@ -319,6 +367,8 @@ def submit_batch(config: dict, requests: list, timeout_override: int | None = No
                                         model,
                                         reasoning,
                                         tools,
+                                        max_output_tokens=max_output_tokens,
+                                        temperature=temperature,
                                         flex_banned=True)
 
     line = {"custom_id": req.custom_id, "method": "POST", "url": "/v1/responses", "body": body}
@@ -449,6 +499,7 @@ def poll_batch(batch_id: str, requests: list, timeout_override: int | None = Non
           "success": True,
           "result": result_data,
           "chain_of_thought": cot.strip(),
+          "meta": extract_openai_usage_meta(body, "openai"),
           "error": None
         })
 
