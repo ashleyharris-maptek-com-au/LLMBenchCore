@@ -992,7 +992,7 @@ def runTest(index: int,
         subpass_meta[idx] = _json_safe(meta)
     except Exception as e:
       print("Failed to get result for subpass " + str(idx) + " - " + str(e))
-      result = {"__exception": str(e)}
+      result = {"__exception__": str(e)}
       chainOfThought = "Exception was thrown: " + str(e)
       subpass_meta.pop(idx, None)
 
