@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# TODO(tech-debt): This module only hosts two tiny helpers. Revisit and inline if
+# call sites consolidate or this starts feeling like unnecessary indirection.
+
 
 def resolve_prompt_prefix(config: dict) -> str | None:
   direct_prefix = config.get("prompt_prefix")

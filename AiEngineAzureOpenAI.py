@@ -18,7 +18,7 @@ import time
 from urllib.parse import parse_qs, urlparse
 
 from . import PromptImageTagging as pit
-from ._engine_utils import extract_usage_meta
+from ._openai_usage_utils import extract_openai_usage_meta
 
 
 def _normalize_azure_endpoint(endpoint: str, api_version: str | None) -> tuple[str, str | None]:
@@ -106,10 +106,14 @@ class AzureOpenAIEngine:
     self.temperature = temperature
     self.emit_meta = emit_meta
     self.forcedFailure = False
+    normalized_endpoint = "" if endpoint is None else str(endpoint)
+    normalized_api_version = "" if api_version is None else str(api_version)
+    normalized_max_output_tokens = "" if max_output_tokens is None else str(max_output_tokens)
+    normalized_temperature = "" if temperature is None else str(temperature)
     self.configAndSettingsHash = hashlib.sha256(
       model.encode() + str(reasoning).encode() + str(tools).encode() +
-      str(endpoint).encode() + str(api_version).encode() + str(timeout).encode() +
-      str(max_output_tokens).encode() + str(temperature).encode() + str(emit_meta).encode()
+      normalized_endpoint.encode() + normalized_api_version.encode() + str(timeout).encode() +
+      normalized_max_output_tokens.encode() + normalized_temperature.encode()
     ).hexdigest()
 
   def AIHook(self, prompt: str, structure: dict | None) -> tuple:
@@ -271,7 +275,7 @@ def _azure_openai_ai_hook(prompt: str, structure: dict | None, model: str, reaso
       response = client.chat.completions.create(**chat_params)
       output_text = response.choices[0].message.content if response.choices else ""
       last_output_text = output_text
-      meta = extract_usage_meta(response, "azure_openai")
+      meta = extract_openai_usage_meta(response, "azure_openai")
 
       if structure is not None:
         if output_text:
@@ -353,7 +357,7 @@ def _azure_openai_ai_hook(prompt: str, structure: dict | None, model: str, reaso
 
     chain_of_thought = chain_of_thought.rstrip("\n")
     last_output_text = output_text
-    meta = extract_usage_meta(completed_response, "azure_openai")
+    meta = extract_openai_usage_meta(completed_response, "azure_openai")
 
     if structure is not None:
       if output_text:

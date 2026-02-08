@@ -150,6 +150,16 @@ python your_benchmark.py --help
 
 ```
 
+### Optional Model Config Fields
+
+Model config dictionaries support these optional fields in addition to core keys such as
+`name`, `engine`, `base_model`, `reasoning`, and `tools`:
+
+- `max_output_tokens`: Per-request output token cap (engine support is provider-specific).
+- `temperature`: Per-request sampling temperature (engine support is provider-specific).
+- `prompt_prefix`: Prepended to each benchmark prompt in runner and batch flows.
+- `experiment_tag`: Stored in run summary metadata for grouping/filtering experiment runs.
+
 ## Architecture
 
 ```

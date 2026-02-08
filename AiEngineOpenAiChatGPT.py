@@ -21,7 +21,7 @@ import json
 import random
 import time
 from . import PromptImageTagging as pit
-from ._engine_utils import extract_usage_meta
+from ._openai_usage_utils import extract_openai_usage_meta
 
 
 class OpenAIEngine:
@@ -60,11 +60,12 @@ class OpenAIEngine:
     self.temperature = temperature
     self.emit_meta = emit_meta
     self.forcedFailure = False
+    normalized_max_output_tokens = "" if max_output_tokens is None else str(max_output_tokens)
+    normalized_temperature = "" if temperature is None else str(temperature)
     self.configAndSettingsHash = hashlib.sha256(model.encode() + str(reasoning).encode() +
                                                 str(tools).encode() + str(timeout).encode() +
-                                                str(max_output_tokens).encode() +
-                                                str(temperature).encode() +
-                                                str(emit_meta).encode()).hexdigest()
+                                                normalized_max_output_tokens.encode() +
+                                                normalized_temperature.encode()).hexdigest()
 
   def AIHook(self, prompt: str, structure: dict | None) -> tuple:
     """Call the OpenAI API with instance configuration."""
@@ -292,7 +293,7 @@ def _openai_ai_hook(prompt: str, structure: dict | None, model: str, reasoning,
 
     # Strip trailing newline from chain of thought if present
     chainOfThought = chainOfThought.rstrip("\n")
-    meta = extract_usage_meta(completed_response, "openai")
+    meta = extract_openai_usage_meta(completed_response, "openai")
 
     #print(output_text)
 
@@ -498,7 +499,7 @@ def poll_batch(batch_id: str, requests: list, timeout_override: int | None = Non
           "success": True,
           "result": result_data,
           "chain_of_thought": cot.strip(),
-          "meta": extract_usage_meta(body, "openai"),
+          "meta": extract_openai_usage_meta(body, "openai"),
           "error": None
         })
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+"""Usage-metadata helpers for OpenAI-compatible response payloads."""
 
 def _read_field(obj, key: str):
   if obj is None:
@@ -27,7 +28,7 @@ def _extract_reasoning_tokens(usage):
   return _coerce_int(_read_field(completion_details, "reasoning_tokens"))
 
 
-def extract_usage_meta(response_obj, provider: str) -> dict:
+def extract_openai_usage_meta(response_obj, provider: str) -> dict:
   usage = _read_field(response_obj, "usage")
   if usage is None:
     usage_meta = {

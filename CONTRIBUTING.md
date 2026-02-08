@@ -41,6 +41,7 @@ When adding support for a new AI provider:
    - `__init__` accepting model, reasoning, and tools parameters
    - `configAndSettingsHash` property for cache keys
    - `AIHook(prompt, structure)` method returning `(result, chainOfThought)`
+   - Compatibility with optional model config fields (`prompt_prefix`, `experiment_tag`)
 3. Add the engine to `run_model_config()` in `TestRunner.py`
 4. Update `requirements.txt` with any new dependencies
 5. Document the setup in the engine's docstring
