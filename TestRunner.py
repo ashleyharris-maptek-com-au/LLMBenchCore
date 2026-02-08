@@ -784,7 +784,7 @@ def checkSavedPromptCache(aiEngineName: str, index: int, subPass: int, prompt: s
           f"Ignoring prompt cache - IGNORE_CACHED_FAILURES is set and result was '{saved_result}'.")
         return None
 
-      print(f"Prompt cache hit for {aiEngineName} Q{index}/S{subPass}")
+      print(f"Prompt cache hit for {aiEngineName} Q{index}/S{subPass}. {prompt_file}")
       # Results are saved with str(result), so use ast.literal_eval to parse
       import ast
       try:
@@ -1806,11 +1806,23 @@ window.VizManager = (function() {
         except:
           all_per_question = {}
 
-    # Merge with existing data for this engine (don't overwrite other questions)
+    # Merge with existing data for this engine (don't overwrite other questions/subtasks)
     if aiEngineName not in all_per_question:
       all_per_question[aiEngineName] = {}
     for q_num, q_data in per_question_scores.items():
-      all_per_question[aiEngineName][str(q_num)] = q_data
+      q_str = str(q_num)
+      if q_str in all_per_question[aiEngineName]:
+        # Merge subtasks instead of replacing whole question
+        existing = all_per_question[aiEngineName][q_str]
+        # Ensure existing has subtasks key (old data may not have it)
+        if "subtasks" not in existing:
+          existing["subtasks"] = {}
+        existing["subtasks"].update(q_data.get("subtasks", {}))
+        # Recalculate score and max from merged subtasks
+        existing["score"] = sum(existing["subtasks"].values())
+        existing["max"] = len(existing["subtasks"])
+      else:
+        all_per_question[aiEngineName][q_str] = q_data
 
     with open(per_question_file, "w", encoding="utf-8") as f:
       json.dump(all_per_question, f, indent=2)
@@ -1975,6 +1987,75 @@ window.VizManager = (function() {
         "best_engine": best_engine,
         "best_pct": best_score * 100
       }
+
+  # Generate per-question subpass performance graphs (max, median, mean)
+  import statistics
+  subpass_perf_graphs = {}  # {q_num: {"max": filename, "median": filename, "mean": filename}}
+
+  for q_num in sorted(all_questions):
+    q_str = str(q_num)
+    # Collect all subtask scores across all engines for this question
+    # Structure: {subtask_num: [list of scores from all engines]}
+    subtask_all_scores = {}
+
+    for engine_name, engine_data in all_per_question.items():
+      if is_placebo_model(engine_name): continue
+      if q_str in engine_data and "subtasks" in engine_data[q_str]:
+        for subtask_str, score in engine_data[q_str]["subtasks"].items():
+          subtask_num = int(subtask_str)
+          if subtask_num not in subtask_all_scores:
+            subtask_all_scores[subtask_num] = []
+          subtask_all_scores[subtask_num].append(score)
+
+    if not subtask_all_scores:
+      continue
+
+    # Calculate max, median, mean for each subtask
+    subtasks_sorted = sorted(subtask_all_scores.keys())
+    max_scores = [max(subtask_all_scores[s]) for s in subtasks_sorted]
+    median_scores = [statistics.median(subtask_all_scores[s]) for s in subtasks_sorted]
+    mean_scores = [statistics.mean(subtask_all_scores[s]) for s in subtasks_sorted]
+
+    subpass_perf_graphs[q_num] = {}
+
+    # Generate max graph
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.bar([str(s) for s in subtasks_sorted], max_scores, color='#10b981')
+    ax.set_xlabel("Subpass")
+    ax.set_ylabel("Score")
+    ax.set_title(f"Q{q_num}: Max Score by Subpass")
+    ax.set_ylim(0, 1)
+    plt.tight_layout()
+    filename_max = f"question_{q_num}_subpass_max.png"
+    plt.savefig(f"results/{filename_max}", dpi=100)
+    plt.close()
+    subpass_perf_graphs[q_num]["max"] = filename_max
+
+    # Generate median graph
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.bar([str(s) for s in subtasks_sorted], median_scores, color='#667eea')
+    ax.set_xlabel("Subpass")
+    ax.set_ylabel("Score")
+    ax.set_title(f"Q{q_num}: Median Score by Subpass")
+    ax.set_ylim(0, 1)
+    plt.tight_layout()
+    filename_median = f"question_{q_num}_subpass_median.png"
+    plt.savefig(f"results/{filename_median}", dpi=100)
+    plt.close()
+    subpass_perf_graphs[q_num]["median"] = filename_median
+
+    # Generate mean graph
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.bar([str(s) for s in subtasks_sorted], mean_scores, color='#f59e0b')
+    ax.set_xlabel("Subpass")
+    ax.set_ylabel("Score")
+    ax.set_title(f"Q{q_num}: Mean Score by Subpass")
+    ax.set_ylim(0, 1)
+    plt.tight_layout()
+    filename_mean = f"question_{q_num}_subpass_mean.png"
+    plt.savefig(f"results/{filename_mean}", dpi=100)
+    plt.close()
+    subpass_perf_graphs[q_num]["mean"] = filename_mean
 
   # Generate index.html landing page
   index_lock = FileLock("results/index.html.lock")
@@ -2263,6 +2344,20 @@ window.VizManager = (function() {
             </table>
         </details>"""
 
+        # Build subpass performance graphs HTML (max, median, mean)
+        subpass_perf_html = ""
+        if q_num in subpass_perf_graphs:
+          perf = subpass_perf_graphs[q_num]
+          subpass_perf_html = f"""
+        <details style="margin-top:15px;">
+            <summary style="cursor:pointer; color:#667eea;"><strong>Performance by Subpass (Max / Median / Mean)</strong></summary>
+            <div style="display:flex; flex-wrap:wrap; gap:10px; margin-top:10px;">
+              <div style="flex:1; min-width:250px;"><img src="{perf['max']}" style="width:100%;"></div>
+              <div style="flex:1; min-width:250px;"><img src="{perf['median']}" style="width:100%;"></div>
+              <div style="flex:1; min-width:250px;"><img src="{perf['mean']}" style="width:100%;"></div>
+            </div>
+        </details>"""
+
         index_file.write(f"""
     <div class="graph-container" id="q{q_num}">
         <img src="../images/{q_num}.png" style="float:right; max-width:400px">
@@ -2274,6 +2369,7 @@ window.VizManager = (function() {
             <summary style="cursor:pointer; color:#667eea;">Click to show comparison graph</summary>
             <img src="{q_data['filename']}" alt="Question {q_num} Results" style="margin-top:10px;">
         </details>
+        {subpass_perf_html}
         {subtask_html}
     </div>
 """)
