@@ -1793,6 +1793,8 @@ window.VizManager = (function() {
       for key, value in sorted(scores.items(), key=lambda item: float(item[1]), reverse=True):
         f.write(f"{key}: {value}\n")
 
+  print("results.txt updated!")
+
   # Save per-question results to JSON
   import json
   per_question_file = "results/results_by_question.json"
@@ -1827,6 +1829,8 @@ window.VizManager = (function() {
     with open(per_question_file, "w", encoding="utf-8") as f:
       json.dump(all_per_question, f, indent=2)
 
+  print("results_by_question.json updated!")
+
   if test_filter is not None:
     return
 
@@ -1859,6 +1863,8 @@ window.VizManager = (function() {
   plt.tight_layout()
   plt.savefig("results/topLevelResults.png", dpi=600)
   plt.close()
+
+  print("topLevelResults.png saved")
 
   # Generate per-question graphs
   question_graphs = {}  # {question_num: {"title": str, "filename": str}}
@@ -1934,6 +1940,7 @@ window.VizManager = (function() {
   }  # {(question_num, subtask_num): {"filename": str, "best_engine": str, "best_pct": float}}
 
   for q_num in sorted(all_questions):
+    print(f"Updating graphs for {q_num}")
     q_str = str(q_num)
     # Get all subtask numbers for this question from all engines
     all_subtasks = set()
@@ -1993,6 +2000,7 @@ window.VizManager = (function() {
   subpass_perf_graphs = {}  # {q_num: {"max": filename, "median": filename, "mean": filename}}
 
   for q_num in sorted(all_questions):
+    print(f"Updating subpass performance graphs for {q_num}")
     q_str = str(q_num)
     # Collect all subtask scores across all engines for this question
     # Structure: {subtask_num: [list of scores from all engines]}
@@ -2056,6 +2064,8 @@ window.VizManager = (function() {
     plt.savefig(f"results/{filename_mean}", dpi=100)
     plt.close()
     subpass_perf_graphs[q_num]["mean"] = filename_mean
+
+  print("Done! Updating index.html page...")
 
   # Generate index.html landing page
   index_lock = FileLock("results/index.html.lock")
