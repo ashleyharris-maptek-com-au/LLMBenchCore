@@ -319,8 +319,20 @@ def _bedrock_ai_hook(prompt: str,
     if tool_config:
       converse_params["toolConfig"] = tool_config
 
-    # Stream the response
-    response = client.converse_stream(**converse_params)
+    # Try streaming first, fall back to sync if model doesn't support streaming with tools
+    use_streaming = True
+
+    try:
+      response = client.converse_stream(**converse_params)
+    except ClientError as stream_err:
+      error_msg = stream_err.response.get('Error', {}).get('Message', '')
+      # Check if this is the "no streaming with tools" error
+      if "doesn't support tool use in streaming mode" in error_msg or \
+         "streaming" in error_msg.lower() and "tool" in error_msg.lower():
+        print(f"Model doesn't support streaming with tools, falling back to sync API")
+        use_streaming = False
+      else:
+        raise  # Re-raise other errors
 
     chainOfThought = ""
     output_text = ""
@@ -329,60 +341,91 @@ def _bedrock_ai_hook(prompt: str,
     current_tool_name = None
     stop_reason = None
 
-    stream = response.get('stream')
-    chunk_count = 0
-    if stream:
-      for event in stream:
-        chunk_count += 1
-        # Handle message start
-        if 'messageStart' in event:
-          pass  # Role info
+    if not use_streaming:
+      # Synchronous fallback
+      response = client.converse(**converse_params)
 
-        # Handle content block start (may indicate tool use or thinking)
-        if 'contentBlockStart' in event:
-          block_start = event['contentBlockStart']
-          if 'start' in block_start:
-            start_info = block_start['start']
-            if 'reasoningContent' in start_info:
-              pass  # Reasoning block starting
-            # Check for tool use start
-            if 'toolUse' in start_info:
-              current_tool_name = start_info['toolUse'].get('name')
-              tool_use_input = ""  # Reset for new tool call
-              print(f"Tool use started: {current_tool_name}")
+      # Extract from sync response
+      output_message = response.get('output', {}).get('message', {})
+      stop_reason = response.get('stopReason', 'unknown')
 
-        # Handle content block delta (main text output or tool input)
-        if 'contentBlockDelta' in event:
-          delta = event['contentBlockDelta'].get('delta', {})
-          if 'text' in delta:
-            output_text += delta['text']
-          # Tool use input comes as JSON string chunks
-          if 'toolUse' in delta:
-            chunk_input = delta['toolUse'].get('input', '')
-            tool_use_input += chunk_input
-            if len(tool_use_input) < 200:  # Only log for small amounts
-              print(f"Tool input chunk: {chunk_input[:100]}")
-          # Some models may include reasoning in a separate field
-          if 'reasoningContent' in delta:
-            thinking = delta['reasoningContent'].get('text', '')
-            current_thinking_line += thinking
-            while "\n" in current_thinking_line:
-              line, current_thinking_line = current_thinking_line.split("\n", 1)
-              print(f"Thinking: {line}", flush=True)
-              chainOfThought += line + "\n"
+      for content_block in output_message.get('content', []):
+        if 'text' in content_block:
+          output_text += content_block['text']
+        if 'toolUse' in content_block:
+          current_tool_name = content_block['toolUse'].get('name')
+          tool_input = content_block['toolUse'].get('input', {})
+          # Tool input from sync API is already parsed dict, convert to JSON string
+          tool_use_input = json.dumps(tool_input) if isinstance(tool_input,
+                                                                dict) else str(tool_input)
+          print(f"Tool use: {current_tool_name}")
+        if 'reasoningContent' in content_block:
+          thinking = content_block['reasoningContent'].get('text', '')
+          chainOfThought += thinking
 
-        # Handle message stop
-        if 'messageStop' in event:
-          stop_reason = event['messageStop'].get('stopReason', 'unknown')
-          print(f"Stream stopped: {stop_reason}")
+      # Log usage
+      usage = response.get('usage', {})
+      if usage:
+        print(f"Tokens - Input: {usage.get('inputTokens', 'N/A')}, "
+              f"Output: {usage.get('outputTokens', 'N/A')}")
+      print(f"Sync response stopped: {stop_reason}")
 
-        # Handle metadata (token usage, etc.)
-        if 'metadata' in event:
-          metadata = event['metadata']
-          if 'usage' in metadata:
-            usage = metadata['usage']
-            print(f"Tokens - Input: {usage.get('inputTokens', 'N/A')}, "
-                  f"Output: {usage.get('outputTokens', 'N/A')}")
+    else:
+      # Streaming path
+      stream = response.get('stream')
+      chunk_count = 0
+      if stream:
+        for event in stream:
+          chunk_count += 1
+          # Handle message start
+          if 'messageStart' in event:
+            pass  # Role info
+
+          # Handle content block start (may indicate tool use or thinking)
+          if 'contentBlockStart' in event:
+            block_start = event['contentBlockStart']
+            if 'start' in block_start:
+              start_info = block_start['start']
+              if 'reasoningContent' in start_info:
+                pass  # Reasoning block starting
+              # Check for tool use start
+              if 'toolUse' in start_info:
+                current_tool_name = start_info['toolUse'].get('name')
+                tool_use_input = ""  # Reset for new tool call
+                print(f"Tool use started: {current_tool_name}")
+
+          # Handle content block delta (main text output or tool input)
+          if 'contentBlockDelta' in event:
+            delta = event['contentBlockDelta'].get('delta', {})
+            if 'text' in delta:
+              output_text += delta['text']
+            # Tool use input comes as JSON string chunks
+            if 'toolUse' in delta:
+              chunk_input = delta['toolUse'].get('input', '')
+              tool_use_input += chunk_input
+              if len(tool_use_input) < 200:  # Only log for small amounts
+                print(f"Tool input chunk: {chunk_input[:100]}")
+            # Some models may include reasoning in a separate field
+            if 'reasoningContent' in delta:
+              thinking = delta['reasoningContent'].get('text', '')
+              current_thinking_line += thinking
+              while "\n" in current_thinking_line:
+                line, current_thinking_line = current_thinking_line.split("\n", 1)
+                print(f"Thinking: {line}", flush=True)
+                chainOfThought += line + "\n"
+
+          # Handle message stop
+          if 'messageStop' in event:
+            stop_reason = event['messageStop'].get('stopReason', 'unknown')
+            print(f"Stream stopped: {stop_reason}")
+
+          # Handle metadata (token usage, etc.)
+          if 'metadata' in event:
+            metadata = event['metadata']
+            if 'usage' in metadata:
+              usage = metadata['usage']
+              print(f"Tokens - Input: {usage.get('inputTokens', 'N/A')}, "
+                    f"Output: {usage.get('outputTokens', 'N/A')}")
 
     # Flush remaining thinking content
     if current_thinking_line:
