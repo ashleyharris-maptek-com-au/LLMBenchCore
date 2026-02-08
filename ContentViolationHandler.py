@@ -13,7 +13,7 @@ import hashlib
 from typing import Optional, Tuple
 from filelock import FileLock
 
-BLOCKED_PROMPTS_FILE = os.path.join(os.path.dirname(__file__), "blocked_prompts.json")
+BLOCKED_PROMPTS_FILE = os.path.join(os.path.dirname(__file__), "..", "blocked_prompts.json")
 BLOCKED_PROMPTS_LOCK = BLOCKED_PROMPTS_FILE + ".lock"
 
 
@@ -228,5 +228,7 @@ def create_violation_response(structure: Optional[dict], reason: str) -> Tuple:
 def is_violation_response(result) -> bool:
   """Check if a result is a content violation marker."""
   if isinstance(result, dict) and result.get("__content_violation__"):
+    return True
+  if isinstance(result, str) and result == "__content_violation__":
     return True
   return False

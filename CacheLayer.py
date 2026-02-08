@@ -157,9 +157,12 @@ class CacheLayer:
     if result:
       result_data = result[0] if isinstance(result, tuple) else result
       if is_violation_response(result_data):
-        reason = ""
+        reason = "Content violation detected"
         if isinstance(result_data, dict):
-          reason = result_data.get("reason", "Content violation detected")
+          reason = result_data.get("reason", reason)
+        # For string violations, try to get reason from chain of thought (second tuple element)
+        elif isinstance(result, tuple) and len(result) > 1 and result[1]:
+          reason = str(result[1])
         block_prompt(self.engineName, index, subPass, prompt, reason)
         # Don't cache content violations - they're permanently blocked
         return result
