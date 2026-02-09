@@ -1853,7 +1853,7 @@ window.VizManager = (function() {
         all_per_question[aiEngineName][q_str] = q_data
 
     with open(per_question_file, "w", encoding="utf-8") as f:
-      json.dump(all_per_question, f, indent=2)
+      json.dump(all_per_question, f, indent=2, sort_keys=True)
 
   print("results_by_question.json updated!")
 
