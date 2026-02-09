@@ -534,6 +534,8 @@ Examples:
   python <script>.py --force -m gpt-5-nano    # Re-run without using cached AI responses
   python <script>.py --batch                  # Run in batch mode (50%% cheaper, async)
   python <script>.py --batch -m "gpt-*,claude-*"  # Batch mode for specific models
+  python <script>.py --import-batch <batch_id> --import-model gpt-5.2  # Import from cancelled batch
+  python <script>.py --import-batch results.jsonl --import-model gpt-5.2  # Import from JSONL file
     """)
 
   parser.add_argument("-t",
@@ -575,6 +577,15 @@ Examples:
                       type=int,
                       default=300,
                       help="Seconds between batch status polls (default: 300)")
+  parser.add_argument("--import-batch",
+                      type=str,
+                      metavar="ID_OR_FILE",
+                      help="Import results from a failed/cancelled batch. Accepts a batch ID "
+                      "(to fetch from provider) or a path to a JSONL file.")
+  parser.add_argument("--import-model",
+                      type=str,
+                      metavar="MODEL",
+                      help="Model name for the batch import (required with --import-batch)")
 
   # Allow runner to add custom arguments
   runner.add_arguments(parser)
@@ -721,6 +732,21 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
 
     model_filter = matched_models
     print(f"Running models: {sorted(model_filter)}")
+
+  # Handle --import-batch mode
+  if args.import_batch:
+    if not args.import_model:
+      print("Error: --import-model is required with --import-batch")
+      sys.exit(1)
+    # Find the model config
+    model_config = next((c for c in all_configs if c["name"] == args.import_model), None)
+    if not model_config:
+      print(
+        f"Error: Model '{args.import_model}' not found. Use --list-models to see available models.")
+      sys.exit(1)
+    from .BatchOrchestrator import import_batch_results
+    import_batch_results(args.import_batch, model_config, runner)
+    sys.exit(0)
 
   # Handle --batch mode
   if args.batch:

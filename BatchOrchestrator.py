@@ -722,3 +722,474 @@ def run_non_batch_engines_sync(requests_by_engine: Dict[str, List[BatchRequest]]
         print(f"[Batch] Completed {req.custom_id}")
       except Exception as e:
         print(f"[Batch] Error on {req.custom_id}: {e}")
+
+
+def import_batch_results(batch_id_or_file: str, model_config: dict, runner) -> int:
+  """
+  Import results from a failed/cancelled batch or a JSONL file.
+  
+  Args:
+    batch_id_or_file: Either a batch ID (to fetch from provider) or path to a JSONL file
+    model_config: The model configuration dict
+    runner: The BenchmarkRunner instance (for creating engine instances)
+    
+  Returns:
+    Number of results imported
+  """
+  engine_name = model_config["name"]
+  engine_type = model_config.get("engine", "unknown")
+
+  print(f"\n[Import] Importing batch results for {engine_name}...")
+
+  # Create engine instance to get config hash
+  engine = create_engine_instance(model_config)
+  if not engine:
+    print(f"[Import] Error: Could not create engine instance for {engine_name}")
+    return 0
+
+  config_hash = engine.configAndSettingsHash
+
+  # Detect if input is a file path or batch ID
+  is_file = os.path.exists(batch_id_or_file) and batch_id_or_file.endswith('.jsonl')
+
+  results = []
+
+  if is_file:
+    # Parse JSONL file directly
+    print(f"[Import] Reading from file: {batch_id_or_file}")
+    results = _parse_jsonl_file(batch_id_or_file, engine_type)
+  else:
+    # Fetch from provider API
+    print(f"[Import] Fetching from batch ID: {batch_id_or_file}")
+    results = _fetch_batch_results(batch_id_or_file, engine_type, model_config)
+
+  if not results:
+    print("[Import] No results found to import")
+    return 0
+
+  # Group results by test_index to minimize test file reloading
+  results_by_test = {}
+  for result in results:
+    custom_id = result.get("custom_id", "")
+    if not custom_id:
+      continue
+
+    # Parse custom_id format: "{engine}_{testIndex}_{subPass}"
+    parts = custom_id.rsplit("_", 2)
+    if len(parts) < 3:
+      print(f"[Import] Warning: Invalid custom_id format: {custom_id}")
+      continue
+
+    try:
+      test_index = int(parts[-2])
+      sub_pass = int(parts[-1])
+    except ValueError:
+      print(f"[Import] Warning: Could not parse test/subpass from: {custom_id}")
+      continue
+
+    if not result.get("success", False):
+      print(f"[Import] Skipping failed result: {custom_id}")
+      continue
+
+    if test_index not in results_by_test:
+      results_by_test[test_index] = []
+    results_by_test[test_index].append((sub_pass, result))
+
+  # Process results grouped by test
+  imported_count = 0
+  test_cache = {}  # Cache loaded test globals and prompts
+
+  for test_index, test_results in sorted(results_by_test.items()):
+    # Load test file to get prompts and structure
+    if test_index not in test_cache:
+      test_file = f"{test_index}.py"
+      if not os.path.exists(test_file):
+        print(f"[Import] Warning: Test file {test_file} not found, skipping")
+        continue
+
+      try:
+        g = {"__file__": test_file}
+        code = open(test_file, encoding="utf-8").read()
+        compiled = compile(code, test_file, "exec")
+        exec(compiled, g)
+
+        # Generate all prompts for this test
+        prompts = []
+        if "prepareSubpassPrompt" in g:
+          sub_pass = 0
+          while True:
+            try:
+              prompts.append(g["prepareSubpassPrompt"](sub_pass))
+              sub_pass += 1
+            except StopIteration:
+              break
+        else:
+          prompts.append(g.get("prompt", ""))
+
+        test_cache[test_index] = {"prompts": prompts, "structure": g.get("structure")}
+      except Exception as e:
+        print(f"[Import] Error loading test {test_index}: {e}")
+        continue
+
+    cached_test = test_cache[test_index]
+    prompts = cached_test["prompts"]
+    structure = cached_test["structure"]
+
+    for sub_pass, result in test_results:
+      if sub_pass >= len(prompts):
+        print(f"[Import] Warning: subpass {sub_pass} exceeds prompt count for test {test_index}")
+        continue
+
+      prompt = prompts[sub_pass]
+      result_data = result.get("result")
+      chain_of_thought = result.get("chain_of_thought", "")
+
+      # Write to cache with correct prompt and structure for proper cache key
+      cache_value = (result_data, chain_of_thought)
+      CacheModule.write_to_cache(prompt, structure, config_hash, cache_value)
+
+      # Write to prompt/raw/cot files
+      rp.ensure_global_result_dirs()
+      rp.ensure_model_dirs(engine_name)
+
+      raw_file = rp.model_raw_path(engine_name, test_index, sub_pass)
+      cot_file = rp.model_cot_path(engine_name, test_index, sub_pass)
+      prompt_file = rp.model_prompt_path(engine_name, test_index, sub_pass)
+
+      with open(raw_file, "w", encoding="utf-8") as f:
+        f.write(str(result_data))
+      with open(cot_file, "w", encoding="utf-8") as f:
+        f.write(str(chain_of_thought))
+      with open(prompt_file, "w", encoding="utf-8") as f:
+        f.write(str(prompt))
+
+      print(f"[Import] Cached: test {test_index} subpass {sub_pass}")
+      imported_count += 1
+
+  print(f"\n[Import] Successfully imported {imported_count} results")
+  return imported_count
+
+
+def _parse_jsonl_file(file_path: str, engine_type: str) -> list:
+  """Parse a JSONL file into a list of result dicts."""
+  results = []
+
+  with open(file_path, "r", encoding="utf-8") as f:
+    for line_num, line in enumerate(f, 1):
+      line = line.strip()
+      if not line:
+        continue
+
+      try:
+        obj = json.loads(line)
+        result = _parse_result_object(obj, engine_type)
+        if result:
+          results.append(result)
+      except json.JSONDecodeError as e:
+        print(f"[Import] Warning: Failed to parse line {line_num}: {e}")
+
+  return results
+
+
+def _parse_result_object(obj: dict, engine_type: str) -> dict:
+  """
+  Parse a single result object from JSONL based on engine type.
+  Returns a normalized result dict with: custom_id, success, result, chain_of_thought, error
+  """
+  custom_id = obj.get("custom_id", "")
+
+  if engine_type == "openai":
+    # OpenAI format: {"custom_id": "...", "response": {"body": {"output": [...]}}}
+    response = obj.get("response", {})
+    body = response.get("body", {})
+
+    text_output = ""
+    cot = ""
+
+    if "output" in body:
+      for item in body.get("output", []):
+        if item.get("type") == "message":
+          for content_item in item.get("content", []):
+            if content_item.get("type") in ("text", "output_text"):
+              text_output = content_item.get("text", "")
+        elif item.get("type") == "reasoning":
+          for summary in item.get("summary", []):
+            if summary.get("type") == "summary_text":
+              cot += summary.get("text", "") + "\n"
+
+    # Try to parse JSON
+    result_data = text_output
+    try:
+      json_text = text_output.strip()
+      if json_text.startswith("```json"):
+        json_text = json_text[7:]
+      if json_text.startswith("```"):
+        json_text = json_text[3:]
+      if json_text.endswith("```"):
+        json_text = json_text[:-3]
+      result_data = json.loads(json_text.strip())
+    except:
+      pass
+
+    return {
+      "custom_id": custom_id,
+      "success": bool(text_output),
+      "result": result_data,
+      "chain_of_thought": cot.strip(),
+      "error": obj.get("error")
+    }
+
+  elif engine_type == "anthropic":
+    # Anthropic format: {"custom_id": "...", "result": {"type": "succeeded", "message": {...}}}
+    result_obj = obj.get("result", {})
+
+    if result_obj.get("type") != "succeeded":
+      return {
+        "custom_id": custom_id,
+        "success": False,
+        "result": None,
+        "chain_of_thought": "",
+        "error": str(result_obj)
+      }
+
+    message = result_obj.get("message", {})
+    text_output = ""
+    cot = ""
+
+    for block in message.get("content", []):
+      if block.get("type") == "text":
+        text_output += block.get("text", "")
+      elif block.get("type") == "thinking":
+        cot += block.get("thinking", "") + "\n"
+
+    # Try to parse JSON
+    result_data = text_output
+    try:
+      json_text = text_output.strip()
+      if json_text.startswith("```json"):
+        json_text = json_text[7:]
+      if json_text.startswith("```"):
+        json_text = json_text[3:]
+      if json_text.endswith("```"):
+        json_text = json_text[:-3]
+      result_data = json.loads(json_text.strip())
+    except:
+      pass
+
+    return {
+      "custom_id": custom_id,
+      "success": True,
+      "result": result_data,
+      "chain_of_thought": cot.strip(),
+      "error": None
+    }
+
+  else:
+    # Generic fallback - try to extract text from common structures
+    text_output = obj.get("text", obj.get("content", obj.get("result", "")))
+    if isinstance(text_output, dict):
+      text_output = json.dumps(text_output)
+
+    return {
+      "custom_id": custom_id,
+      "success": bool(text_output),
+      "result": text_output,
+      "chain_of_thought": "",
+      "error": None
+    }
+
+
+def _fetch_batch_results(batch_id: str, engine_type: str, config: dict) -> list:
+  """Fetch batch results from provider API."""
+  results = []
+
+  try:
+    if engine_type == "openai":
+      from openai import OpenAI
+      client = OpenAI(timeout=3600)
+
+      batch_status = client.batches.retrieve(batch_id)
+      output_file_id = batch_status.output_file_id
+
+      if not output_file_id:
+        # Check for error file
+        error_file_id = batch_status.error_file_id
+        if error_file_id:
+          error_content = client.files.content(error_file_id)
+          print(f"[Import] OpenAI error file:\n{error_content.text[:2000]}")
+        print(f"[Import] Batch status: {batch_status.status}, no output file available")
+        return []
+
+      content = client.files.content(output_file_id)
+      for line in content.text.strip().split("\n"):
+        if line.strip():
+          obj = json.loads(line)
+          result = _parse_result_object(obj, engine_type)
+          if result:
+            results.append(result)
+
+    elif engine_type == "anthropic":
+      from anthropic import Anthropic
+      client = Anthropic()
+
+      for result in client.messages.batches.results(batch_id):
+        custom_id = result.custom_id
+
+        if result.result.type == "succeeded":
+          message = result.result.message
+          text_output = ""
+          cot = ""
+
+          for block in message.content:
+            if block.type == "text":
+              text_output += block.text
+            elif block.type == "thinking":
+              cot += block.thinking + "\n"
+
+          # Try to parse JSON
+          result_data = text_output
+          try:
+            json_text = text_output.strip()
+            if json_text.startswith("```json"):
+              json_text = json_text[7:]
+            if json_text.startswith("```"):
+              json_text = json_text[3:]
+            if json_text.endswith("```"):
+              json_text = json_text[:-3]
+            result_data = json.loads(json_text.strip())
+          except:
+            pass
+
+          results.append({
+            "custom_id": custom_id,
+            "success": True,
+            "result": result_data,
+            "chain_of_thought": cot.strip(),
+            "error": None
+          })
+        else:
+          results.append({
+            "custom_id": custom_id,
+            "success": False,
+            "result": None,
+            "chain_of_thought": "",
+            "error": str(result.result)
+          })
+
+    elif engine_type == "gemini":
+      from google import genai
+      client = genai.Client()
+
+      batch_job = client.batches.get(name=batch_id)
+
+      if batch_job.dest and hasattr(batch_job.dest, 'inlined_responses'):
+        for i, inline_response in enumerate(batch_job.dest.inlined_responses or []):
+          custom_id = f"gemini_{i}"  # Gemini doesn't preserve custom_id well
+
+          if inline_response.error:
+            results.append({
+              "custom_id": custom_id,
+              "success": False,
+              "result": None,
+              "chain_of_thought": "",
+              "error": str(inline_response.error)
+            })
+            continue
+
+          text_content = ""
+          cot = ""
+
+          if inline_response.response:
+            try:
+              text_content = inline_response.response.text
+            except AttributeError:
+              if hasattr(inline_response.response, 'candidates'):
+                for candidate in inline_response.response.candidates:
+                  if hasattr(candidate, 'content') and candidate.content:
+                    for part in candidate.content.parts:
+                      if hasattr(part, 'thought') and part.thought:
+                        cot += part.text + "\n"
+                      elif hasattr(part, 'text'):
+                        text_content += part.text
+
+          # Try to parse JSON
+          result_data = text_content
+          try:
+            json_text = text_content.strip()
+            if json_text.startswith("```json"):
+              json_text = json_text[7:]
+            if json_text.startswith("```"):
+              json_text = json_text[3:]
+            if json_text.endswith("```"):
+              json_text = json_text[:-3]
+            result_data = json.loads(json_text.strip())
+          except:
+            pass
+
+          results.append({
+            "custom_id": custom_id,
+            "success": True,
+            "result": result_data,
+            "chain_of_thought": cot.strip(),
+            "error": None
+          })
+
+    elif engine_type == "xai":
+      from xai_sdk import Client
+      client = Client(timeout=3600)
+
+      pagination_token = None
+      while True:
+        page = client.batch.list_batch_results(batch_id=batch_id,
+                                               limit=100,
+                                               pagination_token=pagination_token)
+
+        for result in page.succeeded:
+          custom_id = result.batch_request_id
+          response = result.response
+
+          text_content = response.content if hasattr(response, 'content') else ""
+          cot = response.reasoning_content if hasattr(response, 'reasoning_content') else ""
+
+          # Try to parse JSON
+          result_data = text_content
+          try:
+            json_text = text_content.strip()
+            if "```json" in json_text:
+              json_text = json_text.split("```json", 1)[1].split("```", 1)[0]
+            elif "```" in json_text:
+              json_text = json_text.split("```", 1)[1].split("```", 1)[0]
+            result_data = json.loads(json_text.strip())
+          except:
+            pass
+
+          results.append({
+            "custom_id": custom_id,
+            "success": True,
+            "result": result_data,
+            "chain_of_thought": cot or "",
+            "error": None
+          })
+
+        for result in page.failed:
+          results.append({
+            "custom_id": result.batch_request_id,
+            "success": False,
+            "result": None,
+            "chain_of_thought": "",
+            "error": result.error_message
+          })
+
+        if page.pagination_token is None:
+          break
+        pagination_token = page.pagination_token
+
+    else:
+      print(f"[Import] Unsupported engine type for batch import: {engine_type}")
+
+  except Exception as e:
+    print(f"[Import] Error fetching batch results: {e}")
+    import traceback
+    traceback.print_exc()
+
+  return results
