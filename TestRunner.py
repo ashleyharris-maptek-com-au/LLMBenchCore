@@ -1070,7 +1070,10 @@ def runTest(index: int,
       if niceResult is not None:
         subpass_data["output_nice"] = niceResult
       elif "resultToNiceReport" in g:
+        report_start = time.time()
         subpass_data["output_nice"] = g["resultToNiceReport"](result, subPass, aiEngineName)
+        report_time = time.time() - report_start
+        if report_time > 1: print(f"Result to nice report {subPass} took {report_time:.2f}s")
       else:
         subpass_data["output_text"] = result
         subpass_data["output_image"] = output_path
@@ -1119,7 +1122,10 @@ def runTest(index: int,
         subpass_data["output_nice"] = niceResult
       elif "resultToNiceReport" in g:
         try:
+          report_start = time.time()
           subpass_data["output_nice"] = g["resultToNiceReport"](result, subPass, aiEngineName)
+          report_time = time.time() - report_start
+          if report_time > 1: print(f"Result to nice report {subPass} took {report_time:.2f}s")
         except Exception as e:
           print("Failed to generate nice report for subpass " + str(subPass) + " - " + str(e))
           subpass_data["output_nice"] = "Failed to generate nice report for subpass " + str(
@@ -1845,15 +1851,30 @@ window.VizManager = (function() {
         # Ensure existing has subtasks key (old data may not have it)
         if "subtasks" not in existing:
           existing["subtasks"] = {}
-        existing["subtasks"].update(q_data.get("subtasks", {}))
+        # Normalize keys in both existing and new subtasks to strings so JSON sort_keys
+        # never sees a mix of int and str keys.
+        existing_subtasks = {str(k): v for k, v in existing["subtasks"].items()}
+        new_subtasks = {str(k): v for k, v in q_data.get("subtasks", {}).items()}
+        existing_subtasks.update(new_subtasks)
+        existing["subtasks"] = existing_subtasks
         # Recalculate score and max from merged subtasks
         existing["score"] = sum(existing["subtasks"].values())
         existing["max"] = len(existing["subtasks"])
       else:
-        all_per_question[aiEngineName][q_str] = q_data
+        # For new questions, also normalize subtask keys to strings
+        if "subtasks" in q_data:
+          new_q_data = dict(q_data)
+          new_q_data["subtasks"] = {str(k): v for k, v in q_data["subtasks"].items()}
+        else:
+          new_q_data = q_data
+        all_per_question[aiEngineName][q_str] = new_q_data
 
-    with open(per_question_file, "w", encoding="utf-8") as f:
-      json.dump(all_per_question, f, indent=2, sort_keys=True)
+    try:
+      with open(per_question_file, "w", encoding="utf-8") as f:
+        json.dump(all_per_question, f, indent=2, sort_keys=True)
+    except:
+      with open(per_question_file, "w", encoding="utf-8") as f:
+        json.dump(all_per_question, f, indent=2)
 
   print("results_by_question.json updated!")
 
