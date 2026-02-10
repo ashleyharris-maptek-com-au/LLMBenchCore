@@ -2003,11 +2003,14 @@ window.VizManager = (function() {
     "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "run_context": run_context,
     "overall": {
-      "total_score": overall_total_score,
-      "max_score": overall_max_score,
-      "accuracy": overall_total_score / overall_max_score if overall_max_score > 0 else 0.0,
-      "percentage": (overall_total_score / overall_max_score * 100.0)
-      if overall_max_score > 0 else 0.0,
+      "total_score":
+      overall_total_score,
+      "max_score":
+      overall_max_score,
+      "accuracy":
+      overall_total_score / overall_max_score if overall_max_score > 0 else 0.0,
+      "percentage":
+      (overall_total_score / overall_max_score * 100.0) if overall_max_score > 0 else 0.0,
     },
     "tests": run_summary_tests,
   }
@@ -2611,30 +2614,32 @@ def run_model_config(config: dict, test_filter: Optional[Dict[int, Optional[Set[
   elif engine_type == "openai":
     from .AiEngineOpenAiChatGPT import OpenAIEngine
     timeout = config.get("timeout") or API_TIMEOUT_OVERRIDE or 3600
-    engine = OpenAIEngine(config["base_model"],
-                          config["reasoning"],
-                          config["tools"],
-                          timeout=timeout,
-                          max_output_tokens=config.get("max_output_tokens"),
-                          temperature=config.get("temperature"),
-                          # Runner path consumes metadata for run_summary/meta artifacts.
-                          emit_meta=True)
+    engine = OpenAIEngine(
+      config["base_model"],
+      config["reasoning"],
+      config["tools"],
+      timeout=timeout,
+      max_output_tokens=config.get("max_output_tokens"),
+      temperature=config.get("temperature"),
+      # Runner path consumes metadata for run_summary/meta artifacts.
+      emit_meta=True)
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
   elif engine_type in ("azure-openai", "azure_openai"):
     from .AiEngineAzureOpenAI import AzureOpenAIEngine
     timeout = config.get("timeout") or API_TIMEOUT_OVERRIDE or 3600
-    engine = AzureOpenAIEngine(config["base_model"],
-                               config["reasoning"],
-                               config["tools"],
-                               config.get("endpoint"),
-                               config.get("api_version"),
-                               timeout=timeout,
-                               max_output_tokens=config.get("max_output_tokens"),
-                               temperature=config.get("temperature"),
-                               # Runner path consumes metadata for run_summary/meta artifacts.
-                               emit_meta=True)
+    engine = AzureOpenAIEngine(
+      config["base_model"],
+      config["reasoning"],
+      config["tools"],
+      config.get("endpoint"),
+      config.get("api_version"),
+      timeout=timeout,
+      max_output_tokens=config.get("max_output_tokens"),
+      temperature=config.get("temperature"),
+      # Runner path consumes metadata for run_summary/meta artifacts.
+      emit_meta=True)
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
