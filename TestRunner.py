@@ -29,6 +29,7 @@ PROPAGATE_UPWARDS = True
 ALL_MODEL_CONFIGS = []
 
 FORCE_ARG = False
+NO_EARLY_FAIL = False
 # Optional override for per-request API timeout (seconds)
 API_TIMEOUT_OVERRIDE: int | None = None
 
@@ -603,6 +604,10 @@ Examples:
   parser.add_argument("--ignore-cached-failures",
                       action="store_true",
                       help="Ignore cached empty/error results")
+  parser.add_argument(
+    "--no-early-fail",
+    action="store_true",
+    help="Disable early-fail logic; always run all subpasses even if initial ones score low.")
   parser.add_argument("--no-propagate-upwards",
                       action="store_true",
                       help="Disable perfect-score result propagation to higher-grade models.")
@@ -682,6 +687,10 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
 
   if args.unskip:
     UNSKIP = True
+
+  if args.no_early_fail:
+    NO_EARLY_FAIL = True
+    print("Early-fail disabled: all subpasses will be executed regardless of initial scores.")
 
   # Let runner handle custom arguments
   runner.handle_arguments(args)
@@ -1065,7 +1074,7 @@ def runTest(index: int,
 
     return result
 
-  earlyFail = "earlyFail" in g
+  earlyFail = "earlyFail" in g and not NO_EARLY_FAIL
   results = [None] * len(prompts)
 
   # Determine which subtasks to run
