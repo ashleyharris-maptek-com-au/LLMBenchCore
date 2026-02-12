@@ -103,10 +103,11 @@ class BatchOrchestrator:
   BATCH_SUPPORTED_ENGINES = {
     "openai": True,
     "anthropic": True,
-    "gemini": True,
+    "gemini": False,  # Seems to exist, but has never completed a batch
     "xai": True,
     "bedrock": False,  # Requires S3 setup - fallback to sync
     "azure_openai": False,  # No batch API - fallback to sync
+    "zai": False,  # No batch API - fallback to sync
     "llamacpp": False,  # Local server - fallback to sync
     "placebo": False,  # Test engine - fallback to sync
   }
@@ -717,6 +718,10 @@ def create_engine_instance(config: Dict):
                              max_output_tokens=config.get("max_output_tokens"),
                              temperature=config.get("temperature"),
                              emit_meta=True)
+  elif engine_type == "zai":
+    from .AiEngineZai import ZaiEngine
+    return ZaiEngine(config["base_model"], config.get("reasoning", False),
+                     config.get("tools", False))
   elif engine_type == "llamacpp":
     from .AiEngineLlamaCpp import LlamaCppEngine
     return LlamaCppEngine(config.get("base_url", "http://localhost:8080"))

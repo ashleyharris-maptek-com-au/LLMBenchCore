@@ -189,6 +189,27 @@ def is_content_violation_bedrock(error: Exception) -> bool:
   return False
 
 
+def is_content_violation_zai(error: Exception) -> bool:
+  """Check if a Z-AI error is a content policy violation."""
+  error_str = str(error).lower()
+
+  indicators = [
+    "content policy",
+    "violat",  # matches violate, violation, violated
+    "not allowed",
+    "safety",
+    "harmful",
+    "sensitive content",
+    "moderation"
+  ]
+
+  for indicator in indicators:
+    if indicator in error_str:
+      return True
+
+  return False
+
+
 def is_content_violation_xai(error: Exception) -> bool:
   """Check if an xAI Grok error is a content policy violation."""
   error_str = str(error).lower()

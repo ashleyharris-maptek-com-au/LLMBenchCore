@@ -403,10 +403,9 @@ def get_default_model_configs() -> List[Dict[str, Any]]:
     })
 
   # Amazon Bedrock - Qwen models
-  bedrock_qwen_models = [
-    ("qwen3-32B", "qwen.qwen3-32b-v1:0"),
-    ("qwen3-VL-235B-22B", "qwen.qwen3-vl-235b-a22b"),
-  ]
+  bedrock_qwen_models = [("qwen3-32B", "qwen.qwen3-32b-v1:0"),
+                         ("qwen3-VL-235B-22B", "qwen.qwen3-vl-235b-a22b"),
+                         ("qwen3-coder-next", "qwen.qwen3-coder-next")]
   for name, model_id in bedrock_qwen_models:
     configs.append({
       "name": name,
@@ -533,6 +532,39 @@ def get_default_model_configs() -> List[Dict[str, Any]]:
       "tools": True,
       "region": "us-east-1",
       "env_key": "AWS_ACCESS_KEY_ID"
+    })
+
+  # Z-AI (Zhipu) models
+  zai_base_models = [
+    "glm-5",
+    "glm-4.6v",
+    "glm-4.7-flashx",
+    "glm-4.6v-flash",
+  ]
+  for model_id in zai_base_models:
+    configs.append({
+      "name": model_id,
+      "engine": "zai",
+      "base_model": model_id,
+      "reasoning": False,
+      "tools": False,
+      "env_key": "ZAI_API_KEY"
+    })
+    configs.append({
+      "name": f"{model_id}-Reasoning",
+      "engine": "zai",
+      "base_model": model_id,
+      "reasoning": 10,
+      "tools": False,
+      "env_key": "ZAI_API_KEY"
+    })
+    configs.append({
+      "name": f"{model_id}-Reasoning-Tools",
+      "engine": "zai",
+      "base_model": model_id,
+      "reasoning": 10,
+      "tools": True,
+      "env_key": "ZAI_API_KEY"
     })
 
   # llama.cpp local server (optional, requires running server)
@@ -2687,6 +2719,13 @@ def run_model_config(config: dict, test_filter: Optional[Dict[int, Optional[Set[
                            config["tools"],
                            config.get("region", "us-east-1"),
                            timeout=timeout)
+    cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
+    runAllTests(cacheLayer.AIHook, name, test_filter)
+
+  elif engine_type == "zai":
+    from .AiEngineZai import ZaiEngine
+    timeout = config.get("timeout") or API_TIMEOUT_OVERRIDE or 3600
+    engine = ZaiEngine(config["base_model"], config["reasoning"], config["tools"], timeout=timeout)
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
