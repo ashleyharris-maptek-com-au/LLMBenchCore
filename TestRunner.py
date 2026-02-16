@@ -1014,6 +1014,9 @@ def runTest(index: int,
   except ImportError:
     print("Missing dependancy. Run 'pip install -r requirements.txt' before running!")
 
+  if "aiEngineHook" in g:
+    g["aiEngineHook"] = aiEngineHook
+
   t2 = time.time()
   if t2 - t > 1: print(f"Loading test {index} took {t2 - t:.2f} seconds")
 
