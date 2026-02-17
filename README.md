@@ -116,6 +116,150 @@ def gradeAnswer(result, subPass, aiEngineName):
     return 0.0, f"Expected 4, got {result.get('answer')}"
 ```
 
+## Test Format Specification
+
+Each test file (e.g., `1.py`, `2.py`) is a Python module with specific global variables that control test behavior. The `TestRunner` inspects these globals to determine how to execute and grade the test.
+
+### Required Globals
+
+| Global | Type | Description |
+|--------|------|-------------|
+| `title` | `str` | Human-readable test name displayed in reports |
+| `structure` | `dict` | JSON schema for structured LLM output validation |
+| `gradeAnswer` | `function` | Grading function: `(result, subPass, aiEngineName) -> (score, explanation)` or `(score, explanation, niceHTML)` |
+
+### Prompt Configuration
+
+**Single-prompt tests:**
+
+```python
+prompt = "Your prompt here"
+```
+
+**Multi-subpass tests:**
+
+```python
+def prepareSubpassPrompt(subPass: int) -> str:
+    if subPass == 0:
+        return "Easy prompt"
+    elif subPass == 1:
+        return "Hard prompt"
+    else:
+        raise StopIteration  # Signals end of subpasses
+```
+
+The runner calls `prepareSubpassPrompt(0)`, `prepareSubpassPrompt(1)`, ... until `StopIteration` is raised.
+
+### Execution Control
+
+| Global | Type | Default | Description |
+|--------|------|---------|-------------|
+| `skip` | `bool` | `False` | Skip this test entirely (unless `--unskip` flag is used) |
+| `singleThreaded` | `bool` | `False` | Run all prompts and grading sequentially. By default, prompts are parallelized across subpasses and grading is parallelized. Use this if your test has global state or race conditions. |
+
+### Early-Fail Optimization
+
+Early-fail assumes that if a model fails easy subpasses, it will also fail harder ones, saving API costs.
+
+| Global | Type | Default | Description |
+|--------|------|---------|-------------|
+| `earlyFail` | `bool` | `False` | Enable early-fail logic. Tests first subpass(es) sequentially; if score < threshold, skip remaining subpasses. |
+| `earlyFailSubpassSampleCount` | `int` | `1` | Number of initial subpasses to test before making early-fail decision. Average score is compared to threshold. |
+| `earlyFailThreshold` | `float` | `0.5` | Score threshold (0-1). If average score of sampled subpasses < threshold, remaining subpasses are skipped. |
+| `earlyFailTestsSameDifficulty` | `bool` | `False` | If `True`, skipped subpasses inherit the average sample score instead of getting 0. Use when all subpasses have similar difficulty. |
+
+**Example:**
+
+```python
+earlyFail = True
+earlyFailSubpassSampleCount = 2  # Test first 2 subpasses
+earlyFailThreshold = 0.6  # Skip rest if avg < 0.6
+```
+
+Disabled with `--no-early-fail` CLI flag.
+
+### Extra Grading Runs
+
+For tests where one LLM solution should handle multiple difficulty levels:
+
+```python
+extraGradeAnswerRuns = [1, 2, 3, 4, 5]  # Subpass indices
+```
+
+- LLM is prompted **only for subpass 0**
+- The **same result** is graded against subpasses 0, 1, 2, 3, 4, 5
+- If any subpass scores 0, remaining `extraGradeAnswerRuns` are skipped
+- Common pattern: subpass 0 is trivial, later subpasses scale up complexity
+
+### Output Formatting
+
+| Global | Type | Description |
+|--------|------|-------------|
+| `resultToNiceReport` | `function` | `(result, subPass, aiEngineName) -> str` - Generate HTML report from result. Called automatically if present. |
+| `resultToImage` | `function` | `(result, subPass, aiEngineName) -> str` - Generate image file from result and return path. Used for visual comparison tests. |
+| `getReferenceImage` | `function` | `(subPass, aiEngineName) -> str` - Return path to reference image for this subpass. |
+
+**gradeAnswer return formats:**
+
+```python
+# Two-element tuple:
+return (score, explanation)
+
+# Three-element tuple (skips resultToNiceReport call):
+return (score, explanation, niceHTML)
+```
+
+### High-Level Summary
+
+```python
+highLevelSummary = """
+Markdown-formatted description of the problem domain, algorithms,
+and complexity. Displayed at the top of the test report.
+"""
+```
+
+### Complete Example
+
+```python
+title = "Graph Coloring (C++)"
+
+# Multi-subpass with increasing complexity
+def prepareSubpassPrompt(subPass: int) -> str:
+    cases = [
+        (10, 3),   # 10 vertices, 3 colors
+        (100, 5),  # 100 vertices, 5 colors
+        (1000, 10) # 1000 vertices, 10 colors
+    ]
+    if subPass >= len(cases):
+        raise StopIteration
+    vertices, colors = cases[subPass]
+    return f"Write C++ to color {vertices}-vertex graph with {colors} colors..."
+
+structure = {
+    "type": "object",
+    "properties": {
+        "reasoning": {"type": "string"},
+        "cpp_code": {"type": "string"}
+    },
+    "required": ["cpp_code"]
+}
+
+# Grade first result against all subpasses
+extraGradeAnswerRuns = [1, 2]
+
+# Early-fail: if trivial case fails, skip complex ones
+earlyFail = True
+earlyFailThreshold = 0.5
+
+def gradeAnswer(result, subPass, aiEngineName):
+    # Compile, run, validate
+    score = validate_solution(result["cpp_code"], subPass)
+    return score, f"Subpass {subPass}: {score}"
+
+def resultToNiceReport(result, subPass, aiEngineName):
+    return f"<pre>{result.get('cpp_code', 'No code')}</pre>"
+```
+
 ### Running Benchmarks
 
 ```bash
@@ -248,6 +392,31 @@ set_placebo_data_provider(modelNames, my_responses)
 Configure multiple placebo models by setting the modelNames variable
 to a list of model names, or by adding configs manually with
 `engine: "placebo"` in your runner overrides.
+
+## Bill shock protections
+
+The benchmark framework has protections to save your wallet, which need to be acknowledged in any research drawn from these results. The following compromises are made:
+
+- Early fail:
+  - Assuming failure of hard tasks if easy tasks are failed. This is call EarlyFail, and can be configured per test.
+  - If you can't lay out 4 pipes in a square or 3 pipes in a triangle, you're not going to be able to lay out 400 pipes in the shape of a world map.
+  - Early fail can be configured to sample multiple early runs, or have adjustable thresholds per test.
+  - This only works when tests are configured that the early subpasses are easiest, so it's opt-in.
+  - This can be turned off with --no-early-fail
+- Propagation upwards:
+  - Assuming a model can ace a test without tools or reasoning, assume that it will also pass with tools or reasoning.
+  - If version 3 of the model can ace a test, assume that version 4 also can.
+  - This works by sorting models based on capability, and propagating results between models with the same prefix.
+  - Can be disabled with --no-propagate-upwards
+- API instability lock out:
+  - If the API fails 9 times in a row, assume it will fail again for the rest of the run.
+  - This can stop a run wasting days retrying when you've hit a spend limit or the network goes down.
+- Double caching:
+  - Results are cached in your temp directory and in the git repo.
+  - This allows runs performed on one machine to be used by another machine to save costs.
+- Eternal caching:
+  - Original design was for results to only be cached for a month, however the realities of API costs got in the way.
+  - You can turn this off by disabling POOR_MODE in CacheLayer.py
 
 ## License
 

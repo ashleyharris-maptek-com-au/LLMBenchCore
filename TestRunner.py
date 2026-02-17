@@ -29,6 +29,7 @@ PROPAGATE_UPWARDS = True
 ALL_MODEL_CONFIGS = []
 
 FORCE_ARG = False
+NO_EARLY_FAIL = False
 # Optional override for per-request API timeout (seconds)
 API_TIMEOUT_OVERRIDE: int | None = None
 
@@ -402,10 +403,9 @@ def get_default_model_configs() -> List[Dict[str, Any]]:
     })
 
   # Amazon Bedrock - Qwen models
-  bedrock_qwen_models = [
-    ("qwen3-32B", "qwen.qwen3-32b-v1:0"),
-    ("qwen3-VL-235B-22B", "qwen.qwen3-vl-235b-a22b"),
-  ]
+  bedrock_qwen_models = [("qwen3-32B", "qwen.qwen3-32b-v1:0"),
+                         ("qwen3-VL-235B-22B", "qwen.qwen3-vl-235b-a22b"),
+                         ("qwen3-coder-next", "qwen.qwen3-coder-next")]
   for name, model_id in bedrock_qwen_models:
     configs.append({
       "name": name,
@@ -534,6 +534,39 @@ def get_default_model_configs() -> List[Dict[str, Any]]:
       "env_key": "AWS_ACCESS_KEY_ID"
     })
 
+  # Z-AI (Zhipu) models
+  zai_base_models = [
+    "glm-5",
+    "glm-4.6v",
+    "glm-4.7-flashx",
+    "glm-4.6v-flash",
+  ]
+  for model_id in zai_base_models:
+    configs.append({
+      "name": model_id,
+      "engine": "zai",
+      "base_model": model_id,
+      "reasoning": False,
+      "tools": False,
+      "env_key": "ZAI_API_KEY"
+    })
+    configs.append({
+      "name": f"{model_id}-Reasoning",
+      "engine": "zai",
+      "base_model": model_id,
+      "reasoning": 10,
+      "tools": False,
+      "env_key": "ZAI_API_KEY"
+    })
+    configs.append({
+      "name": f"{model_id}-Reasoning-Tools",
+      "engine": "zai",
+      "base_model": model_id,
+      "reasoning": 10,
+      "tools": True,
+      "env_key": "ZAI_API_KEY"
+    })
+
   # llama.cpp local server (optional, requires running server)
   # Users can add custom model configs by setting LLAMACPP_BASE_URL
   if os.environ.get("LLAMACPP_BASE_URL"):
@@ -603,6 +636,10 @@ Examples:
   parser.add_argument("--ignore-cached-failures",
                       action="store_true",
                       help="Ignore cached empty/error results")
+  parser.add_argument(
+    "--no-early-fail",
+    action="store_true",
+    help="Disable early-fail logic; always run all subpasses even if initial ones score low.")
   parser.add_argument("--no-propagate-upwards",
                       action="store_true",
                       help="Disable perfect-score result propagation to higher-grade models.")
@@ -689,6 +726,10 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
 
   if args.unskip:
     UNSKIP = True
+
+  if args.no_early_fail:
+    NO_EARLY_FAIL = True
+    print("Early-fail disabled: all subpasses will be executed regardless of initial scores.")
 
   # Let runner handle custom arguments
   runner.handle_arguments(args)
@@ -980,6 +1021,9 @@ def runTest(index: int,
   except ImportError:
     print("Missing dependancy. Run 'pip install -r requirements.txt' before running!")
 
+  if "aiEngineHook" in g:
+    g["aiEngineHook"] = aiEngineHook
+
   t2 = time.time()
   if t2 - t > 1: print(f"Loading test {index} took {t2 - t:.2f} seconds")
 
@@ -1072,7 +1116,7 @@ def runTest(index: int,
 
     return result
 
-  earlyFail = "earlyFail" in g
+  earlyFail = "earlyFail" in g and not NO_EARLY_FAIL
   results = [None] * len(prompts)
 
   # Determine which subtasks to run
@@ -2010,11 +2054,14 @@ window.VizManager = (function() {
     "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "run_context": run_context,
     "overall": {
-      "total_score": overall_total_score,
-      "max_score": overall_max_score,
-      "accuracy": overall_total_score / overall_max_score if overall_max_score > 0 else 0.0,
-      "percentage": (overall_total_score / overall_max_score * 100.0)
-      if overall_max_score > 0 else 0.0,
+      "total_score":
+      overall_total_score,
+      "max_score":
+      overall_max_score,
+      "accuracy":
+      overall_total_score / overall_max_score if overall_max_score > 0 else 0.0,
+      "percentage":
+      (overall_total_score / overall_max_score * 100.0) if overall_max_score > 0 else 0.0,
     },
     "tests": run_summary_tests,
   }
@@ -2618,30 +2665,32 @@ def run_model_config(config: dict, test_filter: Optional[Dict[int, Optional[Set[
   elif engine_type == "openai":
     from .AiEngineOpenAiChatGPT import OpenAIEngine
     timeout = config.get("timeout") or API_TIMEOUT_OVERRIDE or 3600
-    engine = OpenAIEngine(config["base_model"],
-                          config["reasoning"],
-                          config["tools"],
-                          timeout=timeout,
-                          max_output_tokens=config.get("max_output_tokens"),
-                          temperature=config.get("temperature"),
-                          # Runner path consumes metadata for run_summary/meta artifacts.
-                          emit_meta=True)
+    engine = OpenAIEngine(
+      config["base_model"],
+      config["reasoning"],
+      config["tools"],
+      timeout=timeout,
+      max_output_tokens=config.get("max_output_tokens"),
+      temperature=config.get("temperature"),
+      # Runner path consumes metadata for run_summary/meta artifacts.
+      emit_meta=True)
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
   elif engine_type in ("azure-openai", "azure_openai"):
     from .AiEngineAzureOpenAI import AzureOpenAIEngine
     timeout = config.get("timeout") or API_TIMEOUT_OVERRIDE or 3600
-    engine = AzureOpenAIEngine(config["base_model"],
-                               config["reasoning"],
-                               config["tools"],
-                               config.get("endpoint"),
-                               config.get("api_version"),
-                               timeout=timeout,
-                               max_output_tokens=config.get("max_output_tokens"),
-                               temperature=config.get("temperature"),
-                               # Runner path consumes metadata for run_summary/meta artifacts.
-                               emit_meta=True)
+    engine = AzureOpenAIEngine(
+      config["base_model"],
+      config["reasoning"],
+      config["tools"],
+      config.get("endpoint"),
+      config.get("api_version"),
+      timeout=timeout,
+      max_output_tokens=config.get("max_output_tokens"),
+      temperature=config.get("temperature"),
+      # Runner path consumes metadata for run_summary/meta artifacts.
+      emit_meta=True)
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
@@ -2680,6 +2729,13 @@ def run_model_config(config: dict, test_filter: Optional[Dict[int, Optional[Set[
                            config["tools"],
                            config.get("region", "us-east-1"),
                            timeout=timeout)
+    cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
+    runAllTests(cacheLayer.AIHook, name, test_filter)
+
+  elif engine_type == "zai":
+    from .AiEngineZai import ZaiEngine
+    timeout = config.get("timeout") or API_TIMEOUT_OVERRIDE or 3600
+    engine = ZaiEngine(config["base_model"], config["reasoning"], config["tools"], timeout=timeout)
     cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 

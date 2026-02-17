@@ -103,10 +103,11 @@ class BatchOrchestrator:
   BATCH_SUPPORTED_ENGINES = {
     "openai": True,
     "anthropic": True,
-    "gemini": True,
+    "gemini": False,  # Seems to exist, but has never completed a batch
     "xai": True,
     "bedrock": False,  # Requires S3 setup - fallback to sync
     "azure_openai": False,  # No batch API - fallback to sync
+    "zai": False,  # No batch API - fallback to sync
     "llamacpp": False,  # Local server - fallback to sync
     "placebo": False,  # Test engine - fallback to sync
   }
@@ -531,7 +532,8 @@ def gather_all_prompts(orchestrator: BatchOrchestrator,
       prompts.append(g.get("prompt", ""))
 
     # Determine if earlyFail and how many initial prompts to send
-    early_fail = "earlyFail" in g
+    from .TestRunner import NO_EARLY_FAIL
+    early_fail = "earlyFail" in g and not NO_EARLY_FAIL
     early_fail_count = g.get("earlyFailSubpassSampleCount", 1) if early_fail else len(prompts)
     early_fail_threshold = g.get("earlyFailThreshold", 0.5)
 
@@ -684,7 +686,8 @@ def create_engine_instance(config: Dict):
 
   if engine_type == "openai":
     from .AiEngineOpenAiChatGPT import OpenAIEngine
-    return OpenAIEngine(config["base_model"], config.get("reasoning", False),
+    return OpenAIEngine(config["base_model"],
+                        config.get("reasoning", False),
                         config.get("tools", False),
                         max_output_tokens=config.get("max_output_tokens"),
                         temperature=config.get("temperature"),
@@ -707,12 +710,18 @@ def create_engine_instance(config: Dict):
                          config.get("tools", False), config.get("region", "us-east-1"))
   elif engine_type == "azure_openai":
     from .AiEngineAzureOpenAI import AzureOpenAIEngine
-    return AzureOpenAIEngine(config["base_model"], config.get("reasoning", False),
-                             config.get("tools", False), config.get("endpoint"),
+    return AzureOpenAIEngine(config["base_model"],
+                             config.get("reasoning", False),
+                             config.get("tools", False),
+                             config.get("endpoint"),
                              config.get("api_version"),
                              max_output_tokens=config.get("max_output_tokens"),
                              temperature=config.get("temperature"),
                              emit_meta=True)
+  elif engine_type == "zai":
+    from .AiEngineZai import ZaiEngine
+    return ZaiEngine(config["base_model"], config.get("reasoning", False),
+                     config.get("tools", False))
   elif engine_type == "llamacpp":
     from .AiEngineLlamaCpp import LlamaCppEngine
     return LlamaCppEngine(config.get("base_url", "http://localhost:8080"))

@@ -23,92 +23,9 @@ import os
 import json
 import threading
 import requests
-import subprocess
-import tempfile
 import uuid
 from . import PromptImageTagging as pit
-
-
-PYTHON_CODE_TOOL = {
-  "type": "function",
-  "function": {
-    "name": "run_python_code",
-    "description": "Execute Python code and return the output. Use this to perform calculations, data processing, or any computation. The code runs in a fresh Python interpreter with access to standard libraries. Print statements will be captured as output.",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "code": {
-          "type": "string",
-          "description": "The Python code to execute. Use print() to output results."
-        }
-      },
-      "required": ["code"]
-    }
-  }
-}
-
-
-def execute_python_code(code: str, timeout: int = 60) -> str:
-  """
-  Execute Python code in a temporary file and return the output.
-  
-  Args:
-    code: Python code to execute
-    timeout: Maximum execution time in seconds
-    
-  Returns:
-    String containing stdout/stderr from execution
-  """
-  # Create a unique temp file
-  temp_dir = tempfile.gettempdir()
-  script_name = f"llmexec_{uuid.uuid4().hex[:8]}.py"
-  script_path = os.path.join(temp_dir, script_name)
-  
-  try:
-    # Write the code to temp file
-    with open(script_path, "w", encoding="utf-8") as f:
-      f.write(code)
-    
-    print(f"Executing Python code:")
-    print("\n> " + "\n> ".join(code.split("\n")))
-    
-    # Execute the script
-    result = subprocess.run(
-      ["python", script_path],
-      capture_output=True,
-      text=True,
-      timeout=timeout,
-      cwd=temp_dir
-    )
-    
-    # Combine stdout and stderr
-    output = ""
-    if result.stdout:
-      output += result.stdout
-    if result.stderr:
-      if output:
-        output += "\n"
-      output += f"STDERR:\n{result.stderr}"
-    
-    if result.returncode != 0:
-      output += f"\n[Exit code: {result.returncode}]"
-    
-    print(f"Code execution returned:")
-    print("\n< " + "\n< ".join(output.split("\n")))
-    
-    return output if output else "(No output)"
-    
-  except subprocess.TimeoutExpired:
-    return f"Error: Code execution timed out after {timeout} seconds"
-  except Exception as e:
-    return f"Error executing code: {str(e)}"
-  finally:
-    # Clean up temp file
-    try:
-      if os.path.exists(script_path):
-        os.remove(script_path)
-    except:
-      pass
+from .ToolExecutors import ALL_TOOLS, dispatch_tool_call
 
 
 class LlamaCppEngine:
@@ -216,7 +133,7 @@ def _llamacpp_ai_hook(prompt: str, structure: dict | None, model: str, base_url:
     
     # Add tools if enabled
     if tools is True:
-      payload["tools"] = [PYTHON_CODE_TOOL]
+      payload["tools"] = ALL_TOOLS
       payload["tool_choice"] = "auto"
     
     # Handle structured output using JSON schema (only if no tools, as they can conflict)
@@ -283,12 +200,8 @@ def _llamacpp_ai_hook(prompt: str, structure: dict | None, model: str, base_url:
             func_args = {}
           
           # Execute the tool
-          if func_name == "run_python_code":
-            code = func_args.get("code", "")
-            tool_result = execute_python_code(code)
-            chainOfThought += f"\n[Tool: run_python_code]\n{code}\n[Output]\n{tool_result}\n"
-          else:
-            tool_result = f"Error: Unknown tool '{func_name}'"
+          tool_result = dispatch_tool_call(func_name, func_args)
+          chainOfThought += f"\n[Tool: {func_name}]\n{json.dumps(func_args)[:200]}\n[Output]\n{tool_result}\n"
           
           # Add tool result to messages
           payload["messages"].append({
