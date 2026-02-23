@@ -676,6 +676,8 @@ Examples:
                       metavar="MODEL",
                       help="Model name for the batch import (required with --import-batch)")
 
+  parser.add_argument("--propagate-to", type=str, help="Propagate results to these models (comma separated)")
+
   # Allow runner to add custom arguments
   runner.add_arguments(parser)
 
@@ -718,6 +720,11 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
   if args.no_propagate_upwards:
     PROPAGATE_UPWARDS = False
     print("Perfect-score propagation disabled for this run.")
+
+  if args.propagate_to:
+    pt = args.propagate_to.split(",")
+    ALL_MODEL_CONFIGS.extend( {"name": name} for name in pt)
+    print("Perfect-score propagation enabled for these models: {}".format(pt))
 
   if args.offline:
     from . import CacheLayer
