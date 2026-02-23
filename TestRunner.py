@@ -232,7 +232,10 @@ def get_default_model_configs() -> List[Dict[str, Any]]:
   configs.extend(get_placebo_model_configs())
 
   # OpenAI models
-  openai_base_models = ["gpt-5-nano", "gpt-5-mini", "gpt-5.1", "gpt-5.2", "gpt-5.2-pro"]
+  openai_base_models = [
+    "gpt-5-nano", "gpt-5-mini", "gpt-5-codex", 
+    "gpt-5.1", "gpt-5.1-codex", "gpt-5.1-codex-max",
+    "gpt-5.2", "gpt-5.2-codex", "gpt-5.2-pro"]
   for model in openai_base_models:
     configs.append({
       "name": model,
@@ -296,7 +299,8 @@ def get_default_model_configs() -> List[Dict[str, Any]]:
 
   # Gemini models
   gemini_base_models = [
-    "gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-3-pro-preview", "gemini-3-flash-preview"
+    "gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-3-flash-preview", "gemini-3-pro-preview", 
+     "gemini-3.1-pro-preview", 
   ]
   for model in gemini_base_models:
     configs.append({
@@ -350,6 +354,14 @@ def get_default_model_configs() -> List[Dict[str, Any]]:
     "env_key": "XAI_API_KEY"
   })
   configs.append({
+    "name": "grok-code-fast-1",
+    "engine": "xai",
+    "base_model": "grok-code-fast-1",
+    "reasoning": False,
+    "tools": False,
+    "env_key": "XAI_API_KEY"
+  })
+  configs.append({
     "name": "grok-4-0709-HighReasoning",
     "engine": "xai",
     "base_model": "grok-4-0709",
@@ -375,7 +387,7 @@ def get_default_model_configs() -> List[Dict[str, Any]]:
   })
 
   # Anthropic models
-  anthropic_base_models = ["claude-sonnet-4-5", "claude-opus-4-5"]
+  anthropic_base_models = ["claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-4-5"]
   for model in anthropic_base_models:
     configs.append({
       "name": model,
@@ -2521,7 +2533,7 @@ window.VizManager = (function() {
 """)
       for q_num in sorted(question_graphs.keys()):
         # load test file, compile it, and get its globals in a map:
-        g = {}
+        g = {"__file__" : str(q_num) + ".py"}
 
         if not os.path.exists(str(q_num) + ".py"):
           raise StopIteration
