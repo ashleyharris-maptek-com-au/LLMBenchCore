@@ -2319,6 +2319,10 @@ window.VizManager = (function() {
 
   print("Done! Updating index.html page...")
 
+  # Query registered placebo engines for the report
+  from .AiEnginePlacebo import get_placebo_engines
+  placebo_engines = get_placebo_engines()
+
   # Generate index.html landing page
   index_lock = FileLock("results/index.html.lock")
   with index_lock, open("results/index.html", "w", encoding="utf-8") as index_file:
@@ -2531,13 +2535,24 @@ window.VizManager = (function() {
     </div>
 """)
 
-    # Add per-question sections
-    if question_graphs:
-      index_file.write("""
+    if placebo_engines:
+      index_file.write(f"""
     <div class="graph-container">
-        <h2 style="margin-top: 0;">Results by Question</h2>
+        <h2 style="margin-top: 0;">Placebo engines</h2>
+    This benchmark implements {len(placebo_engines)} non LLM engines:
+    <ul>
+""")
+
+      for engine in placebo_engines:
+        index_file.write(f"""<li><b>{html.escape(engine.name)}</b> - {html.escape(engine.description)}</li>""")
+
+      index_file.write("""
+    </ul>
     </div>
 """)
+
+    # Add per-question sections
+    if question_graphs:
       for q_num in sorted(question_graphs.keys()):
         # load test file, compile it, and get its globals in a map:
         g = {"__file__" : str(q_num) + ".py"}

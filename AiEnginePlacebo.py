@@ -1,12 +1,21 @@
 import hashlib
 import inspect
-from typing import Optional, Union, Callable, Tuple
+from dataclasses import dataclass
+from typing import Optional, Union, Callable, Tuple, List
 
 # Placebo data provider - must be set by consuming benchmark
 _placebo_data_provider: Optional[Callable[[str, int, int], Tuple[Optional[Union[dict, str]],
                                                                  str]]] = None
 
-_models = []
+
+@dataclass
+class PlaceboEngineInfo:
+  """Metadata for a placebo engine, exposed to reports."""
+  name: str
+  description: str
+
+
+_models: List[PlaceboEngineInfo] = []
 
 
 def set_placebo_data_provider(
@@ -19,14 +28,33 @@ def set_placebo_data_provider(
   responses for placebo baselines.
   
   Args:
+      models: List of model entries. Each entry can be:
+              - A plain string (name only, description defaults to empty)
+              - A dict with 'name' and optional 'description' keys
+              - A PlaceboEngineInfo instance
       provider: A function that takes (model_name, question_num, subpass) and returns
                 the expected response, or None if no response is available, plus
                 an optional reasoning string.
   """
   global _placebo_data_provider
   global _models
-  _models = models
+  parsed = []
+  for entry in models:
+    if isinstance(entry, PlaceboEngineInfo):
+      parsed.append(entry)
+    elif isinstance(entry, dict):
+      parsed.append(PlaceboEngineInfo(
+        name=entry["name"],
+        description=entry.get("description", "")))
+    else:
+      parsed.append(PlaceboEngineInfo(name=str(entry), description=""))
+  _models = parsed
   _placebo_data_provider = provider
+
+
+def get_placebo_engines() -> List[PlaceboEngineInfo]:
+  """Return the registered placebo engine metadata (name + description)."""
+  return list(_models)
 
 
 class PlaceboEngine:
@@ -78,8 +106,8 @@ class PlaceboEngine:
 
 def get_placebo_model_configs() -> list:
   configs = []
-  for raw_name in _models:
-    name = raw_name.strip()
+  for info in _models:
+    name = info.name.strip()
     if not name:
       continue
     configs.append({
