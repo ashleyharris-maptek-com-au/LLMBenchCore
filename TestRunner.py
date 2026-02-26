@@ -77,6 +77,39 @@ def _json_safe(value: Any) -> Any:
     return {"value": str(value)}
 
 
+def _extract_test_tags(test_globals: dict) -> List[str]:
+  """Read optional tags from a test module and normalize them."""
+  raw_tags = test_globals.get("tags")
+  if raw_tags is None:
+    raw_tags = test_globals.get("testTags")
+  if raw_tags is None:
+    raw_tags = test_globals.get("test_tags")
+
+  if raw_tags is None:
+    return []
+  if isinstance(raw_tags, str):
+    candidates = [raw_tags]
+  elif isinstance(raw_tags, (list, tuple, set)):
+    candidates = list(raw_tags)
+  else:
+    return []
+
+  tags = []
+  seen = set()
+  for value in candidates:
+    if not isinstance(value, str):
+      continue
+    tag = value.strip()
+    if not tag:
+      continue
+    tag_key = tag.lower()
+    if tag_key in seen:
+      continue
+    seen.add(tag_key)
+    tags.append(tag)
+  return tags
+
+
 class BenchmarkRunner(ABC):
   """
   Abstract base class for benchmark runners.
@@ -329,14 +362,14 @@ def get_default_model_configs() -> List[Dict[str, Any]]:
     })
 
   # XAI/Grok models
-  configs.append({
-    "name": "grok-2-vision-1212",
-    "engine": "xai",
-    "base_model": "grok-2-vision-1212",
-    "reasoning": False,
-    "tools": False,
-    "env_key": "XAI_API_KEY"
-  })
+  # configs.append({
+  #   "name": "grok-2-vision-1212",
+  #   "engine": "xai",
+  #   "base_model": "grok-2-vision-1212",
+  #   "reasoning": False,
+  #   "tools": False,
+  #   "env_key": "XAI_API_KEY"
+  # })
   configs.append({
     "name": "grok-4-1-fast-non-reasoning",
     "engine": "xai",
@@ -1603,6 +1636,7 @@ window.VizManager = (function() {
   overall_total_score = 0
   overall_max_score = 0
   per_question_scores = {}  # {question_num: {"title": str, "score": float, "max": int}}
+  test_tags_by_index: Dict[int, List[str]] = {}
   run_summary_tests = []
 
   longestProcessor = (None, None), 0
@@ -1648,6 +1682,11 @@ window.VizManager = (function() {
 
       # Track per-question scores (only for tests that were actually run)
       if test_was_run:
+        test_tags = _extract_test_tags(test_globals)
+        test_tags_by_index[current_test_index] = test_tags
+        if not test_tags:
+          print(f"Warning: Test {current_test_index} has no tags defined")
+
         question_title = test_globals.get("title", f"Test {current_test_index}")
         # Build subtask scores dict: {subtask_num: score}
         subtask_scores = {}
@@ -2126,6 +2165,25 @@ window.VizManager = (function() {
   for engine_data in all_per_question.values():
     all_questions.update(int(q) for q in engine_data.keys())
 
+  # Load tags for each question (used for tag-based aggregate graphs)
+  question_tags: Dict[int, List[str]] = {}
+  for q_num in sorted(all_questions):
+    if q_num in test_tags_by_index:
+      question_tags[q_num] = list(test_tags_by_index[q_num])
+      continue
+
+    test_file = f"{q_num}.py"
+    if not os.path.exists(test_file):
+      question_tags[q_num] = []
+      continue
+
+    g = {"__file__": test_file}
+    try:
+      exec(open(test_file, encoding="utf-8").read(), g)
+      question_tags[q_num] = _extract_test_tags(g)
+    except Exception:
+      question_tags[q_num] = []
+
   for q_num in sorted(all_questions):
     q_str = str(q_num)
     # Collect scores for this question from all engines
@@ -2185,6 +2243,60 @@ window.VizManager = (function() {
       "placebo_score": placebo_score,
       "placebo_engine": placebo_engine,
       "best_pct": best_score * 100
+    }
+
+  # Generate per-tag aggregate graphs
+  tag_to_questions: Dict[str, Set[int]] = {}
+  for q_num, tags in question_tags.items():
+    for tag in tags:
+      if tag not in tag_to_questions:
+        tag_to_questions[tag] = set()
+      tag_to_questions[tag].add(q_num)
+
+  tag_graphs = {}  # {tag: {"filename": str, "question_count": int}}
+  for tag in sorted(tag_to_questions.keys(), key=lambda t: t.lower()):
+    tagged_questions = tag_to_questions[tag]
+    engine_scores = []
+
+    for engine_name, engine_data in all_per_question.items():
+      tagged_score = 0.0
+      tagged_max = 0.0
+      for q_num in tagged_questions:
+        q_str = str(q_num)
+        if q_str not in engine_data:
+          continue
+        q_data = engine_data[q_str]
+        tagged_score += float(q_data.get("score", 0.0))
+        tagged_max += float(q_data.get("max", 0.0))
+
+      if tagged_max > 0:
+        engine_scores.append((engine_name, tagged_score / tagged_max))
+
+    if not engine_scores:
+      continue
+
+    engine_scores.sort(key=lambda x: x[1], reverse=True)
+    engines = [e[0] for e in engine_scores]
+    scores_list = [e[1] for e in engine_scores]
+
+    fig, ax = plt.subplots(figsize=(10, max(3, len(engines) * 0.4)))
+    ax.barh(engines, scores_list, color='#7c3aed')
+    ax.set_xlabel("Score (normalized)")
+    ax.set_ylabel("")
+    ax.set_title(f"Tag: {tag}")
+    ax.set_xlim(0, 1)
+    ax.invert_yaxis()
+    plt.tight_layout()
+
+    safe_tag = "".join(c if c.isalnum() else "_" for c in tag.lower()).strip("_") or "tag"
+    tag_hash = hashlib.md5(tag.encode("utf-8")).hexdigest()[:8]
+    filename = f"tag_{safe_tag}_{tag_hash}.png"
+    plt.savefig(f"results/{filename}", dpi=150)
+    plt.close()
+
+    tag_graphs[tag] = {
+      "filename": filename,
+      "question_count": len(tagged_questions)
     }
 
   # Generate per-subtask graphs
@@ -2548,6 +2660,24 @@ window.VizManager = (function() {
 
       index_file.write("""
     </ul>
+    </div>
+""")
+
+    if tag_graphs:
+      index_file.write("""
+    <div class="graph-container">
+        <h2 style="margin-top: 0;">Results by Tag</h2>
+        <p>Each graph aggregates results across all tests that share a tag, to highlight strengths/weaknesses by test type.</p>
+    </div>
+""")
+
+      for tag in sorted(tag_graphs.keys(), key=lambda t: t.lower()):
+        tg = tag_graphs[tag]
+        index_file.write(f"""
+    <div class="graph-container">
+        <h2 style="margin-top: 0;">Tag: {html.escape(tag)}</h2>
+        <p>{tg['question_count']} test(s) with this tag.</p>
+        <img src="{tg['filename']}" alt="Tag graph for {html.escape(tag)}">
     </div>
 """)
 

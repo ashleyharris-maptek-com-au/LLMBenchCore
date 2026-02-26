@@ -146,6 +146,8 @@ def build_anthropic_message_params(prompt: str,
   # Get the model's max tokens
   if "claude-sonnet-4-5" in model:
     max_tokens = 64000
+  elif "claude-sonnet-4-6" in model:
+    max_tokens = 128000
   elif "claude-opus-4-5" in model:
     max_tokens = 64000
   else:
