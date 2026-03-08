@@ -268,7 +268,8 @@ def get_default_model_configs() -> List[Dict[str, Any]]:
   openai_base_models = [
     "gpt-5-nano", "gpt-5-mini", "gpt-5-codex", 
     "gpt-5.1", "gpt-5.1-codex", "gpt-5.1-codex-max",
-    "gpt-5.2", "gpt-5.2-codex", "gpt-5.2-pro"]
+    "gpt-5.2", "gpt-5.2-codex", "gpt-5.2-pro",
+    "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-pro"]
   for model in openai_base_models:
     configs.append({
       "name": model,
@@ -2144,9 +2145,13 @@ window.VizManager = (function() {
 
   df = df.from_dict(di)
 
-  # Use horizontal bar chart for better label readability
-  fig, ax = plt.subplots(figsize=(10, max(4, len(df) * 0.5)))
-  ax.barh(df["Engine"], df["Score"], color='#1f77b4')
+  # Separate zero-scoring engines from non-zero for cleaner chart
+  zero_score_engines = df[df["Score"] == 0]["Engine"].tolist()
+  df_nonzero = df[df["Score"] > 0]
+
+  # Use horizontal bar chart for better label readability (only non-zero engines)
+  fig, ax = plt.subplots(figsize=(10, max(4, len(df_nonzero) * 0.5)))
+  ax.barh(df_nonzero["Engine"], df_nonzero["Score"], color='#1f77b4')
   ax.set_xlabel("Score")
   ax.set_ylabel("")
   ax.set_title(_current_runner.get_benchmark_title() if _current_runner else "Benchmark Results")
@@ -2271,6 +2276,8 @@ window.VizManager = (function() {
 
       if tagged_max > 0:
         engine_scores.append((engine_name, tagged_score / tagged_max))
+
+    engine_scores = [(name, score) for (name, score) in engine_scores if score > 0]
 
     if not engine_scores:
       continue
@@ -2596,7 +2603,10 @@ window.VizManager = (function() {
     <div class="graph-container">
         <h2 style="margin-top: 0;">Performance Overview</h2>
         <img src="topLevelResults.png" alt="Benchmark Results Graph">
-    </div>
+""" + (f"""        <p style="font-size: 0.85em; color: #666; margin-top: 15px; border-top: 1px solid #eee; padding-top: 10px;">
+            <strong>Engines scoring 0 (not shown in chart):</strong> {', '.join(zero_score_engines)}
+        </p>
+""" if zero_score_engines else "") + """    </div>
     
     <div class="results-table">
         <table>
@@ -2676,7 +2686,7 @@ window.VizManager = (function() {
         index_file.write(f"""
     <div class="graph-container">
         <h2 style="margin-top: 0;">Tag: {html.escape(tag)}</h2>
-        <p>{tg['question_count']} test(s) with this tag.</p>
+        <p>{tg['question_count']} test(s) with this tag. (Engines with a score of 0 have been removed).</p>
         <img src="{tg['filename']}" alt="Tag graph for {html.escape(tag)}">
     </div>
 """)
