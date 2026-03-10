@@ -1239,13 +1239,19 @@ def runTest(index: int,
         score, explanation = gaResult
       else:
         score, explanation, niceResult = gaResult
-
-      output_path = g["resultToImage"](result, subPass, aiEngineName)
+      try:
+        output_path = g["resultToImage"](result, subPass, aiEngineName)
+      except Exception as e:
+        niceResult = "resultToImage threw " + str(e)
       if niceResult is not None:
         subpass_data["output_nice"] = niceResult
       elif "resultToNiceReport" in g:
         report_start = time.time()
-        subpass_data["output_nice"] = g["resultToNiceReport"](result, subPass, aiEngineName)
+        try:
+          subpass_data["output_nice"] = g["resultToNiceReport"](result, subPass, aiEngineName)
+        except Exception as e:
+          subpass_data[
+            "output_nice"] = "resultToNiceReport threw " + str(e)
         report_time = time.time() - report_start
         if report_time > 1: print(f"Result to nice report {subPass} took {report_time:.2f}s")
       else:
@@ -2756,7 +2762,7 @@ window.VizManager = (function() {
         <details style="margin-top:15px;">
             <summary style="cursor:pointer; color:#667eea;"><strong>Subtask Breakdown ({len(q_subtasks)} subtasks)</strong></summary>
             <table style="width:100%; margin-top:10px; font-size:0.9em;">
-              <thead><tr style="background:#4a5568;"><th>Subtask</th><th>Best Engine</th><th>Score</th><th>Graph</th></tr></thead>
+              <thead><tr style="background:#4a5568;"><th>Subtask</th><th>Best Engine (ex. placebo models).</th><th>Score</th><th>Graph</th></tr></thead>
               <tbody>{"".join(subtask_rows)}</tbody>
             </table>
         </details>"""
@@ -2767,7 +2773,7 @@ window.VizManager = (function() {
           perf = subpass_perf_graphs[q_num]
           subpass_perf_html = f"""
         <details style="margin-top:15px;">
-            <summary style="cursor:pointer; color:#667eea;"><strong>Performance by Subpass (Max / Median / Mean)</strong></summary>
+            <summary style="cursor:pointer; color:#667eea;"><strong>LLM Performance by Subpass (Max / Median / Mean)</strong></summary>
             <div style="display:flex; flex-wrap:wrap; gap:10px; margin-top:10px;">
               <div style="flex:1; min-width:250px;"><img src="{perf['max']}" style="width:100%;"></div>
               <div style="flex:1; min-width:250px;"><img src="{perf['median']}" style="width:100%;"></div>
@@ -2780,7 +2786,7 @@ window.VizManager = (function() {
         <img src="../images/{q_num}.png" style="float:right; max-width:400px">
         <a name="q{q_num}"><h2 style="margin-top: 0;color:#fff">Q{q_num}: {html.escape(q_data['title'])}</h2></a>
         {g.get("highLevelSummary","")}
-        <p style='clear:both'><strong>Best result:</strong> <a href="{html.escape(rp.model_report_href_with_anchor(q_data['best_engine'], f'q{q_num}'))}">{html.escape(q_data['best_engine'])}</a> ({q_data['best_pct']:.1f}%)</p>
+        <p style='clear:both'><strong>Best LLM result</strong> <a href="{html.escape(rp.model_report_href_with_anchor(q_data['best_engine'], f'q{q_num}'))}">{html.escape(q_data['best_engine'])}</a> ({q_data['best_pct']:.1f}%)</p>
         {baseline_compare}
         <details>
             <summary style="cursor:pointer; color:#667eea;">Click to show comparison graph</summary>
