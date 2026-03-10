@@ -309,53 +309,156 @@ def _grok_ai_hook(prompt: str, structure: dict | None, model: str, reasoning, to
     return None
 
 
+def _xai_rest_headers() -> dict:
+  """Return Authorization + Content-Type headers for xAI REST API."""
+  api_key = os.environ.get("XAI_API_KEY", "")
+  return {
+    "Authorization": f"Bearer {api_key}",
+    "Content-Type": "application/json",
+  }
+
+
+_XAI_BASE = "https://api.x.ai/v1"
+
+
+def _build_rest_user_content(prompt: str, structure: dict | None) -> str | list:
+  """
+  Convert a prompt (possibly with [[image:...]] tags) into OpenAI-compatible
+  message content for the xAI REST API.
+  Returns a plain string for text-only prompts, or a list of content parts
+  for multimodal prompts.
+  """
+  from PIL import Image
+  import io
+  import base64
+
+  prompt_parts = pit.parse_prompt_parts(prompt)
+
+  # Append structured-output instruction if needed
+  if structure is not None:
+    schema_json = json.dumps(structure, indent=2)
+    prompt_parts.append(("text", f"""
+
+You MUST respond with valid JSON that matches this exact schema:
+{schema_json}
+
+Return ONLY the JSON object, no markdown formatting, no code blocks, no explanation."""))
+
+  has_images = any(t == "image" for t, _ in prompt_parts)
+  if not has_images:
+    # Pure text – just concatenate
+    return "".join(v for _, v in prompt_parts)
+
+  # Multimodal: build content-parts list
+  content_parts: list[dict] = []
+  for part_type, part_value in prompt_parts:
+    if part_type == "text":
+      if part_value:
+        content_parts.append({"type": "text", "text": part_value})
+    elif part_type == "image":
+      if pit.is_url(part_value):
+        url = part_value
+      elif pit.is_data_uri(part_value):
+        url = part_value
+      else:
+        local_path = pit.resolve_local_path(part_value)
+        img = Image.open(local_path)
+        max_dim = 8000
+        if img.width > max_dim or img.height > max_dim:
+          scale = min(max_dim / img.width, max_dim / img.height)
+          new_size = (int(img.width * scale), int(img.height * scale))
+          img = img.resize(new_size, Image.LANCZOS)
+          buffer = io.BytesIO()
+          fmt = img.format or 'PNG'
+          if fmt.upper() == 'JPEG':
+            img.save(buffer, format='JPEG', quality=90)
+            mime_type = 'image/jpeg'
+          else:
+            img.save(buffer, format='PNG')
+            mime_type = 'image/png'
+          b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+          url = f"data:{mime_type};base64,{b64}"
+        else:
+          url = pit.file_to_data_uri(local_path)
+      content_parts.append({
+        "type": "image_url",
+        "image_url": {"url": url}
+      })
+
+  return content_parts
+
+
 def submit_batch(config: dict, requests: list) -> str | None:
   """
-  Submit a batch of requests to xAI's Batch API.
-  
+  Submit a batch of requests to xAI's Batch API via REST.
+
+  The xAI Python SDK's gRPC batch endpoint is unreliable (returns
+  "Stream removed" from Cloudflare), so we use the REST API directly.
+
   Args:
     config: Model configuration dict with base_model, reasoning, tools
     requests: List of BatchRequest objects
-    
+
   Returns:
     Batch ID if successful, None otherwise
   """
-  from xai_sdk import Client
-  from xai_sdk.chat import user as user_msg
+  import requests as http
 
-  client = Client(timeout=3600)
+  headers = _xai_rest_headers()
   model = config.get("base_model", "grok-3")
-  tools = config.get("tools", False)
+  tools_cfg = config.get("tools", False)
 
-  # Create batch with a descriptive name
-  batch = client.batch.create(batch_name=f"LLMBenchCore_{config.get('name', 'batch')}")
+  # Step 1: Create batch
+  print(f"[Batch-xAI] Creating batch (model={model})...")
+  resp = http.post(f"{_XAI_BASE}/batches", headers=headers,
+                   json={"name": f"LLMBenchCore_{config.get('name', 'batch')}"})
+  resp.raise_for_status()
+  batch_data = resp.json()
+  batch_id = batch_data["batch_id"]
+  print(f"[Batch-xAI] Batch created: {batch_id}")
 
-  # Build batch requests using Chat objects per xAI SDK docs
-  batch_requests = []
-  for req in requests:
-    # Build user content using existing helper (returns a list of args)
-    user_args = _build_xai_user_args(req.prompt, req.structure)
+  # Step 2: Build and add requests in chunks
+  # xAI allows up to 100 add-batch-requests calls per 30s per team.
+  CHUNK_SIZE = 20
+  for chunk_start in range(0, len(requests), CHUNK_SIZE):
+    chunk = requests[chunk_start:chunk_start + CHUNK_SIZE]
+    chunk_num = chunk_start // CHUNK_SIZE + 1
+    total_chunks = (len(requests) + CHUNK_SIZE - 1) // CHUNK_SIZE
 
-    # Create a Chat object with batch_request_id
-    chat = client.chat.create(
-      model=model,
-      batch_request_id=req.custom_id,
-    )
+    batch_reqs = []
+    for req in chunk:
+      user_content = _build_rest_user_content(req.prompt, req.structure)
+      messages = [{"role": "user", "content": user_content}]
 
-    # Add user message - unpack args like sync hook does: user(*user_args)
-    chat.append(user_msg(*user_args))
+      completion_body: dict = {"messages": messages, "model": model}
 
-    batch_requests.append(chat)
+      # Add tools if configured
+      if tools_cfg is True:
+        completion_body["tools"] = [
+          {"type": "function", "function": {"name": "web_search"}},
+          {"type": "function", "function": {"name": "code_execution"}},
+        ]
 
-  # Add all requests to batch at once
-  client.batch.add(batch_id=batch.batch_id, batch_requests=batch_requests)
+      batch_reqs.append({
+        "batch_request_id": req.custom_id,
+        "batch_request": {
+          "chat_get_completion": completion_body
+        }
+      })
 
-  return batch.batch_id
+    print(f"[Batch-xAI] Adding chunk {chunk_num}/{total_chunks} ({len(chunk)} requests)...")
+    resp = http.post(f"{_XAI_BASE}/batches/{batch_id}/requests",
+                     headers=headers,
+                     json={"batch_requests": batch_reqs})
+    resp.raise_for_status()
+    print(f"[Batch-xAI] Chunk {chunk_num} added OK")
+
+  return batch_id
 
 
 def poll_batch(batch_id: str, requests: list) -> tuple:
   """
-  Poll an xAI batch for status and results.
+  Poll an xAI batch for status and results via REST.
   
   Args:
     batch_id: The batch ID to poll
@@ -365,19 +468,22 @@ def poll_batch(batch_id: str, requests: list) -> tuple:
     Tuple of (status_string, list of result dicts)
     status_string is one of: "completed", "failed", "processing"
   """
-  from xai_sdk import Client
-  import json
+  import requests as http
 
-  client = Client(timeout=3600)
-  batch_status = client.batch.get(batch_id=batch_id)
+  headers = _xai_rest_headers()
+
+  # Get batch status
+  resp = http.get(f"{_XAI_BASE}/batches/{batch_id}", headers=headers)
+  resp.raise_for_status()
+  batch_data = resp.json()
+
+  state = batch_data.get("state", {})
+  num_pending = state.get("num_pending", 0)
+  num_success = state.get("num_success", 0)
+  num_error = state.get("num_error", 0)
+  num_requests = state.get("num_requests", 0)
 
   results = []
-
-  # Check if all requests are done (num_pending == 0)
-  state = batch_status.state
-  num_pending = state.num_pending if hasattr(state, 'num_pending') else 0
-  num_success = state.num_success if hasattr(state, 'num_success') else 0
-  num_error = state.num_error if hasattr(state, 'num_error') else 0
 
   if num_pending == 0 and (num_success > 0 or num_error > 0):
     # Retrieve all results with pagination
@@ -385,16 +491,40 @@ def poll_batch(batch_id: str, requests: list) -> tuple:
     pagination_token = None
 
     while True:
-      page = client.batch.list_batch_results(batch_id=batch_id,
-                                             limit=100,
-                                             pagination_token=pagination_token)
+      params: dict = {"page_size": 100}
+      if pagination_token:
+        params["pagination_token"] = pagination_token
 
-      for result in page.succeeded:
-        custom_id = result.batch_request_id
-        response = result.response
+      resp = http.get(f"{_XAI_BASE}/batches/{batch_id}/results",
+                      headers=headers, params=params)
+      resp.raise_for_status()
+      page = resp.json()
 
-        text_content = response.content if hasattr(response, 'content') else ""
-        cot = response.reasoning_content if hasattr(response, 'reasoning_content') else ""
+      # REST API returns: {"results": [...], "pagination_token": ...}
+      # Each result: {"batch_request_id": "...", "batch_result": {"response": {"chat_get_completion": {...}}}}
+      for result in page.get("results", []):
+        custom_id = result.get("batch_request_id", "")
+        batch_result = result.get("batch_result", {})
+
+        # Check for error results
+        error = batch_result.get("error")
+        if error:
+          results.append({
+            "custom_id": custom_id,
+            "success": False,
+            "result": None,
+            "chain_of_thought": "",
+            "error": str(error)
+          })
+          continue
+
+        # Extract content from nested response structure
+        chat_completion = batch_result.get("response", {}).get("chat_get_completion", {})
+        choices = chat_completion.get("choices", [])
+        message = choices[0].get("message", {}) if choices else {}
+
+        text_content = message.get("content", "") or ""
+        cot = message.get("reasoning_content", "") or ""
 
         # Parse JSON if structured
         result_data = text_content
@@ -414,32 +544,20 @@ def poll_batch(batch_id: str, requests: list) -> tuple:
           "custom_id": custom_id,
           "success": True,
           "result": result_data,
-          "chain_of_thought": cot or "",
+          "chain_of_thought": cot,
           "error": None
         })
 
-      for result in page.failed:
-        results.append({
-          "custom_id": result.batch_request_id,
-          "success": False,
-          "result": None,
-          "chain_of_thought": "",
-          "error": result.error_message
-        })
-
-      if page.pagination_token is None:
+      pagination_token = page.get("pagination_token")
+      if not pagination_token:
         break
-      pagination_token = page.pagination_token
 
     return "completed", results
 
   elif num_pending == 0 and num_success == 0 and num_error == 0:
-    # Batch exists but no results yet or failed to start
     return "failed", results
 
   else:
-    # Still processing
-    total = state.num_requests if hasattr(state, 'num_requests') else 0
     completed = num_success + num_error
-    print(f"[Batch] xAI batch {batch_id}: {completed}/{total} complete, {num_pending} pending")
+    print(f"[Batch] xAI batch {batch_id}: {completed}/{num_requests} complete, {num_pending} pending")
     return "processing", results

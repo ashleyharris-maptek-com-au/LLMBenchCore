@@ -1170,21 +1170,44 @@ def _fetch_batch_results(batch_id: str, engine_type: str, config: dict) -> list:
           })
 
     elif engine_type == "xai":
-      from xai_sdk import Client
-      client = Client(timeout=3600)
+      # Use REST API — the gRPC batch endpoint is unreliable
+      import requests as http
+      api_key = os.environ.get("XAI_API_KEY", "")
+      headers = {"Authorization": f"Bearer {api_key}"}
+      base = "https://api.x.ai/v1"
 
       pagination_token = None
       while True:
-        page = client.batch.list_batch_results(batch_id=batch_id,
-                                               limit=100,
-                                               pagination_token=pagination_token)
+        params = {"page_size": 100}
+        if pagination_token:
+          params["pagination_token"] = pagination_token
 
-        for result in page.succeeded:
-          custom_id = result.batch_request_id
-          response = result.response
+        resp = http.get(f"{base}/batches/{batch_id}/results",
+                        headers=headers, params=params)
+        resp.raise_for_status()
+        page = resp.json()
 
-          text_content = response.content if hasattr(response, 'content') else ""
-          cot = response.reasoning_content if hasattr(response, 'reasoning_content') else ""
+        for result in page.get("results", []):
+          custom_id = result.get("batch_request_id", "")
+          batch_result = result.get("batch_result", {})
+
+          error = batch_result.get("error")
+          if error:
+            results.append({
+              "custom_id": custom_id,
+              "success": False,
+              "result": None,
+              "chain_of_thought": "",
+              "error": str(error)
+            })
+            continue
+
+          chat_completion = batch_result.get("response", {}).get("chat_get_completion", {})
+          choices = chat_completion.get("choices", [])
+          message = choices[0].get("message", {}) if choices else {}
+
+          text_content = message.get("content", "") or ""
+          cot = message.get("reasoning_content", "") or ""
 
           # Try to parse JSON
           result_data = text_content
@@ -1202,22 +1225,13 @@ def _fetch_batch_results(batch_id: str, engine_type: str, config: dict) -> list:
             "custom_id": custom_id,
             "success": True,
             "result": result_data,
-            "chain_of_thought": cot or "",
+            "chain_of_thought": cot,
             "error": None
           })
 
-        for result in page.failed:
-          results.append({
-            "custom_id": result.batch_request_id,
-            "success": False,
-            "result": None,
-            "chain_of_thought": "",
-            "error": result.error_message
-          })
-
-        if page.pagination_token is None:
+        pagination_token = page.get("pagination_token")
+        if not pagination_token:
           break
-        pagination_token = page.pagination_token
 
     else:
       print(f"[Import] Unsupported engine type for batch import: {engine_type}")
