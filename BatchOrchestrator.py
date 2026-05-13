@@ -684,6 +684,10 @@ def create_engine_instance(config: Dict):
   """Create an AI engine instance from config."""
   engine_type = config.get("engine", "unknown")
 
+  # Engine object (e.g. AiEngineMultiplexer) – already instantiated
+  if not isinstance(engine_type, str):
+    return engine_type
+
   if engine_type == "openai":
     from .AiEngineOpenAiChatGPT import OpenAIEngine
     return OpenAIEngine(config["base_model"],
@@ -1182,8 +1186,7 @@ def _fetch_batch_results(batch_id: str, engine_type: str, config: dict) -> list:
         if pagination_token:
           params["pagination_token"] = pagination_token
 
-        resp = http.get(f"{base}/batches/{batch_id}/results",
-                        headers=headers, params=params)
+        resp = http.get(f"{base}/batches/{batch_id}/results", headers=headers, params=params)
         resp.raise_for_status()
         page = resp.json()
 

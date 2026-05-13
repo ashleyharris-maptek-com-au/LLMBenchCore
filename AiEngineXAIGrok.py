@@ -42,16 +42,29 @@ class GrokEngine:
   - timeout: Request timeout in seconds
   """
 
+  @staticmethod
+  def Available():
+    if os.environ.get("XAI_API_KEY"):
+      return True
+    return {"env", "XAI_API_KEY"}
+
   def __init__(self, model: str, reasoning=False, tools=False, timeout: int = 3600):
     self.model = model
     self.reasoning = reasoning
     self.tools = tools
     self.timeout = timeout
-    self.configAndSettingsHash = hashlib.sha256(model.encode() + str(reasoning).encode() + str(tools).encode() + str(timeout).encode()).hexdigest()
+    self.configAndSettingsHash = hashlib.sha256(model.encode() + str(reasoning).encode() +
+                                                str(tools).encode() +
+                                                str(timeout).encode()).hexdigest()
 
   def AIHook(self, prompt: str, structure: dict | None) -> tuple:
     """Call the Grok API with instance configuration."""
-    return _grok_ai_hook(prompt, structure, self.model, self.reasoning, self.tools, timeout_override=self.timeout)
+    return _grok_ai_hook(prompt,
+                         structure,
+                         self.model,
+                         self.reasoning,
+                         self.tools,
+                         timeout_override=self.timeout)
 
 
 def json_schema_to_pydantic(schema: dict, name: str = "DynamicModel") -> type[BaseModel]:
@@ -184,7 +197,12 @@ def build_xai_chat_params(model: str, tools) -> dict:
   return chat_params
 
 
-def _grok_ai_hook(prompt: str, structure: dict | None, model: str, reasoning, tools, timeout_override: int | None = None) -> tuple:
+def _grok_ai_hook(prompt: str,
+                  structure: dict | None,
+                  model: str,
+                  reasoning,
+                  tools,
+                  timeout_override: int | None = None) -> tuple:
   """
     This function is called by the test runner to get the AI's response to a prompt.
     
@@ -380,10 +398,7 @@ Return ONLY the JSON object, no markdown formatting, no code blocks, no explanat
           url = f"data:{mime_type};base64,{b64}"
         else:
           url = pit.file_to_data_uri(local_path)
-      content_parts.append({
-        "type": "image_url",
-        "image_url": {"url": url}
-      })
+      content_parts.append({"type": "image_url", "image_url": {"url": url}})
 
   return content_parts
 
@@ -410,7 +425,8 @@ def submit_batch(config: dict, requests: list) -> str | None:
 
   # Step 1: Create batch
   print(f"[Batch-xAI] Creating batch (model={model})...")
-  resp = http.post(f"{_XAI_BASE}/batches", headers=headers,
+  resp = http.post(f"{_XAI_BASE}/batches",
+                   headers=headers,
                    json={"name": f"LLMBenchCore_{config.get('name', 'batch')}"})
   resp.raise_for_status()
   batch_data = resp.json()
@@ -435,8 +451,18 @@ def submit_batch(config: dict, requests: list) -> str | None:
       # Add tools if configured
       if tools_cfg is True:
         completion_body["tools"] = [
-          {"type": "function", "function": {"name": "web_search"}},
-          {"type": "function", "function": {"name": "code_execution"}},
+          {
+            "type": "function",
+            "function": {
+              "name": "web_search"
+            }
+          },
+          {
+            "type": "function",
+            "function": {
+              "name": "code_execution"
+            }
+          },
         ]
 
       batch_reqs.append({
@@ -495,8 +521,7 @@ def poll_batch(batch_id: str, requests: list) -> tuple:
       if pagination_token:
         params["pagination_token"] = pagination_token
 
-      resp = http.get(f"{_XAI_BASE}/batches/{batch_id}/results",
-                      headers=headers, params=params)
+      resp = http.get(f"{_XAI_BASE}/batches/{batch_id}/results", headers=headers, params=params)
       resp.raise_for_status()
       page = resp.json()
 
@@ -559,5 +584,6 @@ def poll_batch(batch_id: str, requests: list) -> tuple:
 
   else:
     completed = num_success + num_error
-    print(f"[Batch] xAI batch {batch_id}: {completed}/{num_requests} complete, {num_pending} pending")
+    print(
+      f"[Batch] xAI batch {batch_id}: {completed}/{num_requests} complete, {num_pending} pending")
     return "processing", results

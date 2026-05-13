@@ -44,6 +44,12 @@ class BedrockEngine:
   - timeout: Request timeout in seconds
   """
 
+  @staticmethod
+  def Available():
+    if os.environ.get("AWS_ACCESS_KEY_ID"):
+      return True
+    return {"env", "AWS_ACCESS_KEY_ID"}
+
   def __init__(self,
                model: str,
                reasoning=False,

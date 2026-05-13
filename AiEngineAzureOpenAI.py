@@ -70,8 +70,7 @@ def _sanitize_schema_for_azure(schema):
   if isinstance(schema, dict):
     return {
       key: _sanitize_schema_for_azure(value)
-      for key, value in schema.items()
-      if key != "uniqueItems"
+      for key, value in schema.items() if key != "uniqueItems"
     }
   if isinstance(schema, list):
     return [_sanitize_schema_for_azure(value) for value in schema]
@@ -92,9 +91,21 @@ class AzureOpenAIEngine:
       Defaults to False for backward-compatible (result, chain_of_thought).
   """
 
-  def __init__(self, model: str, reasoning=False, tools=False, endpoint: str | None = None,
-               api_version: str | None = None, timeout: int = 3600,
-               max_output_tokens: int | None = None, temperature: float | None = None,
+  @staticmethod
+  def Available():
+    if os.environ.get("AZURE_OPENAI_API_KEY") and os.environ.get("AZURE_OPENAI_ENDPOINT"):
+      return True
+    return {"env", "AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT"}
+
+  def __init__(self,
+               model: str,
+               reasoning=False,
+               tools=False,
+               endpoint: str | None = None,
+               api_version: str | None = None,
+               timeout: int = 3600,
+               max_output_tokens: int | None = None,
+               temperature: float | None = None,
                emit_meta: bool = False):
     self.model = model
     self.reasoning = reasoning
@@ -110,15 +121,22 @@ class AzureOpenAIEngine:
     normalized_api_version = "" if api_version is None else str(api_version)
     normalized_max_output_tokens = "" if max_output_tokens is None else str(max_output_tokens)
     normalized_temperature = "" if temperature is None else str(temperature)
-    self.configAndSettingsHash = hashlib.sha256(
-      model.encode() + str(reasoning).encode() + str(tools).encode() +
-      normalized_endpoint.encode() + normalized_api_version.encode() + str(timeout).encode() +
-      normalized_max_output_tokens.encode() + normalized_temperature.encode()
-    ).hexdigest()
+    self.configAndSettingsHash = hashlib.sha256(model.encode() + str(reasoning).encode() +
+                                                str(tools).encode() + normalized_endpoint.encode() +
+                                                normalized_api_version.encode() +
+                                                str(timeout).encode() +
+                                                normalized_max_output_tokens.encode() +
+                                                normalized_temperature.encode()).hexdigest()
 
   def AIHook(self, prompt: str, structure: dict | None) -> tuple:
-    result = _azure_openai_ai_hook(prompt, structure, self.model, self.reasoning, self.tools,
-                                   self.endpoint, self.api_version, self,
+    result = _azure_openai_ai_hook(prompt,
+                                   structure,
+                                   self.model,
+                                   self.reasoning,
+                                   self.tools,
+                                   self.endpoint,
+                                   self.api_version,
+                                   self,
                                    timeout_override=self.timeout,
                                    max_output_tokens=self.max_output_tokens,
                                    temperature=self.temperature)
@@ -215,9 +233,15 @@ def _convert_tools(tools):
   return tools_list or None
 
 
-def _azure_openai_ai_hook(prompt: str, structure: dict | None, model: str, reasoning, tools,
-                          endpoint: str | None, api_version: str | None,
-                          engine_instance, timeout_override: int | None = None,
+def _azure_openai_ai_hook(prompt: str,
+                          structure: dict | None,
+                          model: str,
+                          reasoning,
+                          tools,
+                          endpoint: str | None,
+                          api_version: str | None,
+                          engine_instance,
+                          timeout_override: int | None = None,
                           max_output_tokens: int | None = None,
                           temperature: float | None = None) -> tuple:
   if engine_instance.forcedFailure:
@@ -239,7 +263,9 @@ def _azure_openai_ai_hook(prompt: str, structure: dict | None, model: str, reaso
     if not api_version:
       api_version = os.environ.get("AZURE_OPENAI_API_VERSION") or "2025-04-01-preview"
 
-    client = AzureOpenAI(azure_endpoint=endpoint, api_key=api_key, api_version=api_version,
+    client = AzureOpenAI(azure_endpoint=endpoint,
+                         api_key=api_key,
+                         api_version=api_version,
                          timeout=timeout_override or engine_instance.timeout)
 
     # Azure uses deployment name for model
@@ -325,7 +351,9 @@ def _azure_openai_ai_hook(prompt: str, structure: dict | None, model: str, reaso
     elif tools_converted:
       response_params["tools"] = tools_converted
 
-    stream = client.responses.create(stream=True, timeout=timeout_override or 3600, **response_params)
+    stream = client.responses.create(stream=True,
+                                     timeout=timeout_override or 3600,
+                                     **response_params)
 
     chain_of_thought = ""
     output_text = ""

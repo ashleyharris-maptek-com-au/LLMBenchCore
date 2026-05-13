@@ -36,19 +36,36 @@ class ClaudeEngine:
   - timeout: Request timeout in seconds
   """
 
-  def __init__(self, model: str, reasoning=False, tools=False, prompt_caching=True, timeout: int = 3600):
+  @staticmethod
+  def Available():
+    if os.environ.get("ANTHROPIC_API_KEY"):
+      return True
+    return {"env", "ANTHROPIC_API_KEY"}
+
+  def __init__(self,
+               model: str,
+               reasoning=False,
+               tools=False,
+               prompt_caching=True,
+               timeout: int = 3600):
     self.model = model
     self.reasoning = reasoning
     self.tools = tools
     self.prompt_caching = prompt_caching
     self.timeout = timeout
     self.configAndSettingsHash = hashlib.sha256(model.encode() + str(reasoning).encode() +
-                                                str(tools).encode() + str(timeout).encode()).hexdigest()
+                                                str(tools).encode() +
+                                                str(timeout).encode()).hexdigest()
 
   def AIHook(self, prompt: str, structure: dict | None) -> tuple:
     """Call the Claude API with instance configuration."""
-    return _claude_ai_hook(prompt, structure, self.model, self.reasoning, self.tools,
-                           self.prompt_caching, timeout_override=self.timeout)
+    return _claude_ai_hook(prompt,
+                           structure,
+                           self.model,
+                           self.reasoning,
+                           self.tools,
+                           self.prompt_caching,
+                           timeout_override=self.timeout)
 
 
 def _build_anthropic_message_content(prompt: str) -> list[dict]:
@@ -205,8 +222,13 @@ def build_anthropic_message_params(prompt: str,
   return message_params
 
 
-def _claude_ai_hook(prompt: str, structure: dict | None, model: str, reasoning, tools,
-                    prompt_caching: bool, timeout_override: int | None = None) -> tuple:
+def _claude_ai_hook(prompt: str,
+                    structure: dict | None,
+                    model: str,
+                    reasoning,
+                    tools,
+                    prompt_caching: bool,
+                    timeout_override: int | None = None) -> tuple:
   """
     This function is called by the test runner to get the AI's response to a prompt.
     

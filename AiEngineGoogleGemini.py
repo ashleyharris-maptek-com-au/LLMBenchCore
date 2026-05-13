@@ -51,18 +51,32 @@ class GeminiEngine:
   - timeout: Request timeout in seconds
   """
 
-  def __init__(self, model: str, reasoning=False, tools=False, timeout: int = DEFAULT_TIMEOUT_SECONDS):
+  def __init__(self,
+               model: str,
+               reasoning=False,
+               tools=False,
+               timeout: int = DEFAULT_TIMEOUT_SECONDS):
     self.model = model
     self.reasoning = reasoning
     self.tools = tools
     self.timeout = timeout
     self.configAndSettingsHash = hashlib.sha256(model.encode() + str(reasoning).encode() +
-                                                str(tools).encode() + str(timeout).encode()).hexdigest()
+                                                str(tools).encode() +
+                                                str(timeout).encode()).hexdigest()
+
+  @staticmethod
+  def Available():
+    if "GEMINI_API_KEY" in os.environ: return True
+    return {"env", "GEMINI_API_KEY"}
 
   def AIHook(self, prompt: str, structure: dict | None) -> tuple:
     """Call the Gemini API with instance configuration."""
-    return _gemini_ai_hook(prompt, structure, self.model, self.reasoning, self.tools,
-                          timeout_override=self.timeout)
+    return _gemini_ai_hook(prompt,
+                           structure,
+                           self.model,
+                           self.reasoning,
+                           self.tools,
+                           timeout_override=self.timeout)
 
 
 def json_schema_to_pydantic(schema: dict, name: str = "DynamicModel") -> type[BaseModel]:
@@ -296,8 +310,12 @@ def build_gemini_config(structure: dict | None, reasoning, tools) -> dict:
   return config_params
 
 
-def _gemini_ai_hook(prompt: str, structure: dict | None, model: str, reasoning,
-                    tools, timeout_override: int | None = None) -> dict | str:
+def _gemini_ai_hook(prompt: str,
+                    structure: dict | None,
+                    model: str,
+                    reasoning,
+                    tools,
+                    timeout_override: int | None = None) -> dict | str:
   """
     This function is called by the test runner to get the AI's response to a prompt.
     

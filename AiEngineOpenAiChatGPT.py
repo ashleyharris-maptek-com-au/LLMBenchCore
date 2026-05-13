@@ -67,6 +67,11 @@ class OpenAIEngine:
                                                 normalized_max_output_tokens.encode() +
                                                 normalized_temperature.encode()).hexdigest()
 
+  @staticmethod
+  def Available():
+    if "OPENAI_API_KEY" in os.environ: return True
+    return {"env", "OPENAI_API_KEY"}
+
   def AIHook(self, prompt: str, structure: dict | None) -> tuple:
     """Call the OpenAI API with instance configuration."""
     result = _openai_ai_hook(prompt,
@@ -222,8 +227,13 @@ def build_openai_response_params(prompt: str,
   return response_params
 
 
-def _openai_ai_hook(prompt: str, structure: dict | None, model: str, reasoning,
-                    tools, engine_instance, timeout_override: int | None = None,
+def _openai_ai_hook(prompt: str,
+                    structure: dict | None,
+                    model: str,
+                    reasoning,
+                    tools,
+                    engine_instance,
+                    timeout_override: int | None = None,
                     max_output_tokens: int | None = None,
                     temperature: float | None = None) -> tuple:
   """

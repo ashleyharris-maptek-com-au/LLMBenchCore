@@ -20,6 +20,8 @@ from .CacheLayer import CacheLayer as cl
 from . import ResultPaths as rp
 from ._prompt_utils import apply_prompt_prefix, resolve_prompt_prefix
 
+from .AiEngineMultiplexer import AiEngineMultiplexerFactory
+
 global UNSKIP
 UNSKIP = False
 IGNORE_CACHED_FAILURES = False
@@ -255,366 +257,199 @@ class BenchmarkRunner(ABC):
       run_model_config(config, test_filter)
 
 
-def get_default_model_configs() -> List[Dict[str, Any]]:
+def _config_name(model: str, reasoning, tools) -> str:
+  """Generate a unique config name from model + reasoning level + tools flag."""
+  name = model
+  if isinstance(reasoning, int) and reasoning > 0:
+    if reasoning <= 3:
+      name += "-LowReasoning"
+    elif reasoning <= 5:
+      name += "-MedReasoning"
+    elif reasoning <= 7:
+      name += "-HighReasoning"
+    else:
+      name += "-MaxReasoning"
+  elif reasoning is True:
+    name += "-Reasoning"
+  if tools:
+    name += "-Tools"
+  return name
+
+
+def get_default_model_configs() -> List[Any]:
   """
-  Returns the default list of model configurations for all major AI providers.
+  Returns the default list of engines.
+
+  Each provider is wrapped in a multiplexer that tries CLI / cloud / direct-API
+  backends in priority order.  Availability is checked inside each engine's
+  ``Available()`` method, so no ``env_key`` is needed at the config level for
+  multiplexed entries.
   """
   configs = []
 
   from .AiEnginePlacebo import get_placebo_model_configs
   configs.extend(get_placebo_model_configs())
 
-  # OpenAI models
+  # ── OpenAI  (Codex CLI → Azure → direct API) ───────────────────────────
+  from .AiEngineCodex import OpenAIEngineCodex
+  from .AiEngineAzureOpenAI import AzureOpenAIEngine
+  from .AiEngineOpenAiChatGPT import OpenAIEngine
+
+  openai_mux = AiEngineMultiplexerFactory([
+    OpenAIEngineCodex,
+    lambda m, r, t: AzureOpenAIEngine(m, r, t, os.environ.get("AZURE_OPENAI_ENDPOINT"),
+                                      os.environ.get("AZURE_OPENAI_API_VERSION")),
+    OpenAIEngine,
+  ])
+
   openai_base_models = [
-    "gpt-5-nano", "gpt-5-mini", "gpt-5-codex", 
-    "gpt-5.1", "gpt-5.1-codex", "gpt-5.1-codex-max",
-    "gpt-5.2", "gpt-5.2-codex", "gpt-5.2-pro",
-    "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-pro"]
+    "gpt-5-nano", "gpt-5-mini", "gpt-5-codex", "gpt-5.1", "gpt-5.1-codex", "gpt-5.1-codex-max",
+    "gpt-5.2", "gpt-5.2-codex", "gpt-5.2-pro", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-pro", "gpt-5.5"
+  ]
   for model in openai_base_models:
-    configs.append({
-      "name": model,
-      "engine": "openai",
-      "base_model": model,
-      "reasoning": False,
-      "tools": False,
-      "env_key": "OPENAI_API_KEY"
-    })
-    configs.append({
-      "name": f"{model}-HighReasoning",
-      "engine": "openai",
-      "base_model": model,
-      "reasoning": 10,
-      "tools": False,
-      "env_key": "OPENAI_API_KEY"
-    })
+    for reasoning in [0, 2, 4, 6, 9]:
+      for tools in [True, False]:
+        configs.append({
+          "name": _config_name(model, reasoning, tools),
+          "engine": openai_mux.create(model, reasoning, tools),
+          "base_model": model,
+          "reasoning": reasoning,
+          "tools": tools,
+        })
 
-    if "5.2-pro" not in model:
-      configs.append({
-        "name": f"{model}-Reasoning-Tools",
-        "engine": "openai",
-        "base_model": model,
-        "reasoning": 10,
-        "tools": True,
-        "env_key": "OPENAI_API_KEY"
-      })
+  # ── Gemini  (Gemini CLI → direct API) ───────────────────────────────────
+  from .AiEngineGeminiCli import GeminiCliEngine
+  from .AiEngineGoogleGemini import GeminiEngine
 
-  # Azure OpenAI (optional, configured via env)
-  # Uses deployment name as base_model.
-  configs.append({
-    "name": "gpt-5.2-chat-azure",
-    "engine": "azure_openai",
-    "base_model": "gpt-5.2-chat",
-    "reasoning": False,
-    "tools": False,
-    "env_key": "AZURE_OPENAI_API_KEY",
-    "endpoint": os.environ.get("AZURE_OPENAI_ENDPOINT"),
-    "api_version": os.environ.get("AZURE_OPENAI_API_VERSION")
-  })
-  configs.append({
-    "name": "gpt-5.2-chat-azure-Reasoning",
-    "engine": "azure_openai",
-    "base_model": "gpt-5.2-chat",
-    "reasoning": 5,
-    "tools": False,
-    "env_key": "AZURE_OPENAI_API_KEY",
-    "endpoint": os.environ.get("AZURE_OPENAI_ENDPOINT"),
-    "api_version": os.environ.get("AZURE_OPENAI_API_VERSION")
-  })
-  configs.append({
-    "name": "gpt-5.2-chat-azure-Reasoning-Tools",
-    "engine": "azure_openai",
-    "base_model": "gpt-5.2-chat",
-    "reasoning": 5,
-    "tools": True,
-    "env_key": "AZURE_OPENAI_API_KEY",
-    "endpoint": os.environ.get("AZURE_OPENAI_ENDPOINT"),
-    "api_version": os.environ.get("AZURE_OPENAI_API_VERSION")
-  })
+  gemini_mux = AiEngineMultiplexerFactory([
+    GeminiCliEngine,
+    GeminiEngine,
+  ])
 
-  # Gemini models
   gemini_base_models = [
-    "gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-3-flash-preview", "gemini-3-pro-preview", 
-     "gemini-3.1-pro-preview", 
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-3-flash-preview",
+    "gemini-3-pro-preview",
+    "gemini-3.1-pro-preview",
   ]
   for model in gemini_base_models:
-    configs.append({
-      "name": model,
-      "engine": "gemini",
-      "base_model": model,
-      "reasoning": False,
-      "tools": False,
-      "env_key": "GEMINI_API_KEY"
-    })
-    configs.append({
-      "name": f"{model}-HighReasoning",
-      "engine": "gemini",
-      "base_model": model,
-      "reasoning": 10,
-      "tools": False,
-      "env_key": "GEMINI_API_KEY"
-    })
-    configs.append({
-      "name": f"{model}-Reasoning-Tools",
-      "engine": "gemini",
-      "base_model": model,
-      "reasoning": 10,
-      "tools": True,
-      "env_key": "GEMINI_API_KEY"
-    })
+    for reasoning in [0, 2, 4, 6, 9]:
+      for tools in [True, False]:
+        configs.append({
+          "name": _config_name(model, reasoning, tools),
+          "engine": gemini_mux.create(model, reasoning, tools),
+          "base_model": model,
+          "reasoning": reasoning,
+          "tools": tools,
+        })
 
-  # XAI/Grok models
-  # configs.append({
-  #   "name": "grok-2-vision-1212",
-  #   "engine": "xai",
-  #   "base_model": "grok-2-vision-1212",
-  #   "reasoning": False,
-  #   "tools": False,
-  #   "env_key": "XAI_API_KEY"
-  # })
-  configs.append({
-    "name": "grok-4-1-fast-non-reasoning",
-    "engine": "xai",
-    "base_model": "grok-4-1-fast-non-reasoning",
-    "reasoning": False,
-    "tools": False,
-    "env_key": "XAI_API_KEY"
-  })
-  configs.append({
-    "name": "grok-4-1-fast-reasoning",
-    "engine": "xai",
-    "base_model": "grok-4-1-fast-reasoning",
-    "reasoning": 10,
-    "tools": False,
-    "env_key": "XAI_API_KEY"
-  })
-  configs.append({
-    "name": "grok-code-fast-1",
-    "engine": "xai",
-    "base_model": "grok-code-fast-1",
-    "reasoning": False,
-    "tools": False,
-    "env_key": "XAI_API_KEY"
-  })
-  configs.append({
-    "name": "grok-4-0709-HighReasoning",
-    "engine": "xai",
-    "base_model": "grok-4-0709",
-    "reasoning": 10,
-    "tools": False,
-    "env_key": "XAI_API_KEY"
-  })
-  configs.append({
-    "name": "grok-4-0709",
-    "engine": "xai",
-    "base_model": "grok-4-0709",
-    "reasoning": False,
-    "tools": False,
-    "env_key": "XAI_API_KEY"
-  })
-  configs.append({
-    "name": "grok-4-0709-Reasoning-Tools",
-    "engine": "xai",
-    "base_model": "grok-4-0709",
-    "reasoning": 10,
-    "tools": True,
-    "env_key": "XAI_API_KEY"
-  })
+  # ── Anthropic  (Claude CLI → Bedrock → direct API) ─────────────────────
+  from .AiEngineClaudeCli import ClaudeCliEngine
+  from .AiEngineAmazonBedrock import BedrockEngine
+  from .AiEngineAnthropicClaude import ClaudeEngine
 
-  # Anthropic models
-  anthropic_base_models = ["claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-4-5"]
+  # Mapping from Anthropic model names to Bedrock model IDs
+  _ANTHROPIC_BEDROCK_MAP = {
+    "claude-sonnet-4-5": "us.anthropic.claude-sonnet-4-5-v1:0",
+    "claude-sonnet-4-6": "us.anthropic.claude-sonnet-4-6-v1:0",
+    "claude-opus-4-5": "us.anthropic.claude-opus-4-5-v1:0",
+    "claude-opus-4-6": "us.anthropic.claude-opus-4-6-v1:0",
+    "claude-opus-4-7": "us.anthropic.claude-opus-4-7-v1:0",
+  }
+
+  def _bedrock_claude_factory(m, r, t):
+    bedrock_id = _ANTHROPIC_BEDROCK_MAP.get(m, f"us.anthropic.{m}-v1:0")
+    return BedrockEngine(bedrock_id, r, t, region="us-east-1")
+
+  anthropic_mux = AiEngineMultiplexerFactory([
+    ClaudeCliEngine,
+    _bedrock_claude_factory,
+    ClaudeEngine,
+  ])
+
+  anthropic_base_models = [
+    "claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-4-5", "claude-opus-4-6",
+    "claude-opus-4-7"
+  ]
   for model in anthropic_base_models:
-    configs.append({
-      "name": model,
-      "engine": "anthropic",
-      "base_model": model,
-      "reasoning": False,
-      "tools": False,
-      "env_key": "ANTHROPIC_API_KEY"
-    })
-    configs.append({
-      "name": f"{model}-HighReasoning",
-      "engine": "anthropic",
-      "base_model": model,
-      "reasoning": 10,
-      "tools": False,
-      "env_key": "ANTHROPIC_API_KEY"
-    })
-    configs.append({
-      "name": f"{model}-Reasoning-Tools",
-      "engine": "anthropic",
-      "base_model": model,
-      "reasoning": 10,
-      "tools": True,
-      "env_key": "ANTHROPIC_API_KEY"
-    })
+    for reasoning in [0, 2, 4, 6, 9]:
+      for tools in [True, False]:
+        configs.append({
+          "name": _config_name(model, reasoning, tools),
+          "engine": anthropic_mux.create(model, reasoning, tools),
+          "base_model": model,
+          "reasoning": reasoning,
+          "tools": tools,
+        })
 
-  # Amazon Bedrock - Qwen models
-  bedrock_qwen_models = [("qwen3-32B", "qwen.qwen3-32b-v1:0"),
-                         ("qwen3-VL-235B-22B", "qwen.qwen3-vl-235b-a22b"),
-                         ("qwen3-coder-next", "qwen.qwen3-coder-next")]
-  for name, model_id in bedrock_qwen_models:
-    configs.append({
-      "name": name,
-      "engine": "bedrock",
-      "base_model": model_id,
-      "reasoning": False,
-      "tools": False,
-      "region": "us-east-1",
-      "env_key": "AWS_ACCESS_KEY_ID"
-    })
-    configs.append({
-      "name": name + "-HighReasoning",
-      "engine": "bedrock",
-      "base_model": model_id,
-      "reasoning": 10,
-      "tools": False,
-      "region": "us-east-1",
-      "env_key": "AWS_ACCESS_KEY_ID"
-    })
-    configs.append({
-      "name": name + "-Reasoning-Tools",
-      "engine": "bedrock",
-      "base_model": model_id,
-      "reasoning": 10,
-      "tools": True,
-      "region": "us-east-1",
-      "env_key": "AWS_ACCESS_KEY_ID"
-    })
+  # ── Grok / xAI  (Grok CLI → direct API) ────────────────────────────────
+  from .AiEngineGrokCli import GrokCliEngine
+  from .AiEngineXAIGrok import GrokEngine
 
-  # Amazon Bedrock - Llama models
-  bedrock_llama_models = [
-    ("llama3-70b-bedrock", "meta.llama3-70b-instruct-v1:0"),
-    ("llama3-1-405b-bedrock", "meta.llama3-1-405b-instruct-v1:0"),
+  grok_mux = AiEngineMultiplexerFactory([
+    GrokCliEngine,
+    GrokEngine,
+  ])
+
+  grok_configs = [
+    ("grok-4-1-fast-non-reasoning", "grok-4-1-fast-non-reasoning", False, False),
+    ("grok-4-1-fast-reasoning", "grok-4-1-fast-reasoning", 10, False),
+    ("grok-code-fast-1", "grok-code-fast-1", False, False),
+    ("grok-4-0709", "grok-4-0709", False, False),
+    ("grok-4-0709-HighReasoning", "grok-4-0709", 10, False),
+    ("grok-4-0709-Reasoning-Tools", "grok-4-0709", 10, True),
   ]
-  for name, model_id in bedrock_llama_models:
+  for name, base_model, reasoning, tools in grok_configs:
     configs.append({
       "name": name,
-      "engine": "bedrock",
-      "base_model": model_id,
-      "reasoning": False,
-      "tools": False,
-      "region": "us-west-2",
-      "env_key": "AWS_ACCESS_KEY_ID"
-    })
-    configs.append({
-      "name": name + "-HighReasoning",
-      "engine": "bedrock",
-      "base_model": model_id,
-      "reasoning": 10,
-      "tools": False,
-      "region": "us-west-2",
-      "env_key": "AWS_ACCESS_KEY_ID"
-    })
-    configs.append({
-      "name": name + "-Reasoning-Tools",
-      "engine": "bedrock",
-      "base_model": model_id,
-      "reasoning": 10,
-      "tools": True,
-      "region": "us-west-2",
-      "env_key": "AWS_ACCESS_KEY_ID"
+      "engine": grok_mux.create(base_model, reasoning, tools),
+      "base_model": base_model,
+      "reasoning": reasoning,
+      "tools": tools,
     })
 
-  # Amazon Bedrock - Mistral models
-  bedrock_mistral_models = [("mistral-large-bedrock", "mistral.mistral-large-2402-v1:0"),
-                            ("mistral-large-3-bedrock", "mistral.mistral-large-3-675b-instruct")]
-
-  for name, model_id in bedrock_mistral_models:
-    configs.append({
-      "name": name,
-      "engine": "bedrock",
-      "base_model": model_id,
-      "reasoning": False,
-      "tools": False,
-      "region": "us-east-1",
-      "env_key": "AWS_ACCESS_KEY_ID"
-    })
-    configs.append({
-      "name": name + "-HighReasoning",
-      "engine": "bedrock",
-      "base_model": model_id,
-      "reasoning": 10,
-      "tools": False,
-      "region": "us-east-1",
-      "env_key": "AWS_ACCESS_KEY_ID"
-    })
-    configs.append({
-      "name": name + "-Reasoning-Tools",
-      "engine": "bedrock",
-      "base_model": model_id,
-      "reasoning": 10,
-      "tools": True,
-      "region": "us-east-1",
-      "env_key": "AWS_ACCESS_KEY_ID"
-    })
-
-  # Amazon Nova models
-  nova_models = [("nova-lite", "amazon.nova-lite-v1:0"), ("nova-pro", "amazon.nova-pro-v1:0"),
-                 ("nova-premier", "us.amazon.nova-premier-v1:0")]
-  for name, model_id in nova_models:
-    configs.append({
-      "name": name,
-      "engine": "bedrock",
-      "base_model": model_id,
-      "reasoning": False,
-      "tools": False,
-      "region": "us-east-1",
-      "env_key": "AWS_ACCESS_KEY_ID"
-    })
-    configs.append({
-      "name": name + "-HighReasoning",
-      "engine": "bedrock",
-      "base_model": model_id,
-      "reasoning": 10,
-      "tools": False,
-      "region": "us-east-1",
-      "env_key": "AWS_ACCESS_KEY_ID"
-    })
-    configs.append({
-      "name": name + "-Reasoning-Tools",
-      "engine": "bedrock",
-      "base_model": model_id,
-      "reasoning": False,
-      "tools": True,
-      "region": "us-east-1",
-      "env_key": "AWS_ACCESS_KEY_ID"
-    })
-
-  # Z-AI (Zhipu) models
-  zai_base_models = [
-    "glm-5",
-    "glm-4.6v",
-    "glm-4.7-flashx",
-    "glm-4.6v-flash",
+  # ── Amazon Bedrock  (Qwen, Llama, Mistral, Nova) ───────────────────────
+  # These are Bedrock-only models; no multiplexer needed.
+  bedrock_model_groups = [
+    # (display_name, bedrock_model_id, region)
+    ("qwen3-32B", "qwen.qwen3-32b-v1:0", "us-east-1"),
+    ("qwen3-VL-235B-22B", "qwen.qwen3-vl-235b-a22b", "us-east-1"),
+    ("qwen3-coder-next", "qwen.qwen3-coder-next", "us-east-1"),
+    ("llama3-70b-bedrock", "meta.llama3-70b-instruct-v1:0", "us-west-2"),
+    ("llama3-1-405b-bedrock", "meta.llama3-1-405b-instruct-v1:0", "us-west-2"),
+    ("mistral-large-bedrock", "mistral.mistral-large-2402-v1:0", "us-east-1"),
+    ("mistral-large-3-bedrock", "mistral.mistral-large-3-675b-instruct", "us-east-1"),
+    ("nova-lite", "amazon.nova-lite-v1:0", "us-east-1"),
+    ("nova-pro", "amazon.nova-pro-v1:0", "us-east-1"),
+    ("nova-premier", "us.amazon.nova-premier-v1:0", "us-east-1"),
   ]
+  for display_name, model_id, region in bedrock_model_groups:
+    for reasoning, tools in [(False, False), (10, False), (10, True)]:
+      configs.append({
+        "name": _config_name(display_name, reasoning, tools),
+        "engine": "bedrock",
+        "base_model": model_id,
+        "reasoning": reasoning,
+        "tools": tools,
+        "region": region,
+        "env_key": "AWS_ACCESS_KEY_ID",
+      })
+
+  # ── Z-AI (Zhipu) models ────────────────────────────────────────────────
+  zai_base_models = ["glm-5", "glm-4.6v", "glm-4.7-flashx", "glm-4.6v-flash"]
   for model_id in zai_base_models:
-    configs.append({
-      "name": model_id,
-      "engine": "zai",
-      "base_model": model_id,
-      "reasoning": False,
-      "tools": False,
-      "env_key": "ZAI_API_KEY"
-    })
-    configs.append({
-      "name": f"{model_id}-Reasoning",
-      "engine": "zai",
-      "base_model": model_id,
-      "reasoning": 10,
-      "tools": False,
-      "env_key": "ZAI_API_KEY"
-    })
-    configs.append({
-      "name": f"{model_id}-Reasoning-Tools",
-      "engine": "zai",
-      "base_model": model_id,
-      "reasoning": 10,
-      "tools": True,
-      "env_key": "ZAI_API_KEY"
-    })
+    for reasoning, tools in [(False, False), (10, False), (10, True)]:
+      configs.append({
+        "name": _config_name(model_id, reasoning, tools),
+        "engine": "zai",
+        "base_model": model_id,
+        "reasoning": reasoning,
+        "tools": tools,
+        "env_key": "ZAI_API_KEY",
+      })
 
-  # llama.cpp local server (optional, requires running server)
-  # Users can add custom model configs by setting LLAMACPP_BASE_URL
+  # ── llama.cpp local server (optional) ───────────────────────────────────
   if os.environ.get("LLAMACPP_BASE_URL"):
     llamacpp_model = os.environ.get("LLAMACPP_MODEL_NAME", "llamacpp-local")
     configs.append({
@@ -622,7 +457,7 @@ def get_default_model_configs() -> List[Dict[str, Any]]:
       "engine": "llamacpp",
       "base_model": llamacpp_model,
       "base_url": os.environ.get("LLAMACPP_BASE_URL"),
-      "env_key": "LLAMACPP_BASE_URL"
+      "env_key": "LLAMACPP_BASE_URL",
     })
 
   return configs
@@ -710,7 +545,9 @@ Examples:
                       metavar="MODEL",
                       help="Model name for the batch import (required with --import-batch)")
 
-  parser.add_argument("--propagate-to", type=str, help="Propagate results to these models (comma separated)")
+  parser.add_argument("--propagate-to",
+                      type=str,
+                      help="Propagate results to these models (comma separated)")
 
   # Allow runner to add custom arguments
   runner.add_arguments(parser)
@@ -757,7 +594,7 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
 
   if args.propagate_to:
     pt = args.propagate_to.split(",")
-    ALL_MODEL_CONFIGS.extend( {"name": name} for name in pt)
+    ALL_MODEL_CONFIGS.extend({"name": name} for name in pt)
     print("Perfect-score propagation enabled for these models: {}".format(pt))
 
   if args.offline:
@@ -808,8 +645,17 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
   if args.list_models:
     print("Available models:")
     for config in all_configs:
-      env_key = config.get("env_key")
-      available = "+" if (env_key is None or os.environ.get(env_key)) else f"x (needs {env_key})"
+      engine = config.get("engine")
+      if not isinstance(engine, str):
+        # Multiplexer-based engine – check via Available()
+        if hasattr(engine, "Available"):
+          avail = engine.Available()
+          available = "+" if (avail is True or avail == True) else "x (no backends)"
+        else:
+          available = "+"
+      else:
+        env_key = config.get("env_key")
+        available = "+" if (env_key is None or os.environ.get(env_key)) else f"x (needs {env_key})"
       print(f"  {available} {config['name']}")
     sys.exit(0)
 
@@ -1250,8 +1096,7 @@ def runTest(index: int,
         try:
           subpass_data["output_nice"] = g["resultToNiceReport"](result, subPass, aiEngineName)
         except Exception as e:
-          subpass_data[
-            "output_nice"] = "resultToNiceReport threw " + str(e)
+          subpass_data["output_nice"] = "resultToNiceReport threw " + str(e)
         report_time = time.time() - report_start
         if report_time > 1: print(f"Result to nice report {subPass} took {report_time:.2f}s")
       else:
@@ -2307,10 +2152,7 @@ window.VizManager = (function() {
     plt.savefig(f"results/{filename}", dpi=150)
     plt.close()
 
-    tag_graphs[tag] = {
-      "filename": filename,
-      "question_count": len(tagged_questions)
-    }
+    tag_graphs[tag] = {"filename": filename, "question_count": len(tagged_questions)}
 
   # Generate per-subtask graphs
   subtask_graphs = {
@@ -2672,7 +2514,8 @@ window.VizManager = (function() {
 """)
 
       for engine in placebo_engines:
-        index_file.write(f"""<li><b>{html.escape(engine.name)}</b> - {html.escape(engine.description)}</li>""")
+        index_file.write(
+          f"""<li><b>{html.escape(engine.name)}</b> - {html.escape(engine.description)}</li>""")
 
       index_file.write("""
     </ul>
@@ -2701,7 +2544,7 @@ window.VizManager = (function() {
     if question_graphs:
       for q_num in sorted(question_graphs.keys()):
         # load test file, compile it, and get its globals in a map:
-        g = {"__file__" : str(q_num) + ".py"}
+        g = {"__file__": str(q_num) + ".py"}
 
         if not os.path.exists(str(q_num) + ".py"):
           raise StopIteration
@@ -2823,6 +2666,19 @@ def run_model_config(config: dict, test_filter: Optional[Dict[int, Optional[Set[
   else:
     ALL_MODEL_CONFIGS[existing_index] = config
 
+  # ── Engine object (e.g. AiEngineMultiplexer) ──────────────────────────
+  if not isinstance(engine_type, str):
+    engine = engine_type
+    if hasattr(engine, "Available"):
+      avail = engine.Available()
+      if avail is not True and avail != True:
+        print(f"Skipping {name}: no backends available")
+        return
+    cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
+    runAllTests(cacheLayer.AIHook, name, test_filter)
+    return
+
+  # ── String-based engine type (legacy path) ────────────────────────────
   # Check if required API key is available
   env_key = config.get("env_key")
   if env_key and not os.environ.get(env_key):
