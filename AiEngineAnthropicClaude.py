@@ -242,7 +242,7 @@ def _claude_ai_hook(prompt: str,
   from anthropic import Anthropic
 
   # Initialize the client - it will automatically use ANTHROPIC_API_KEY environment variable
-  client = Anthropic(timeout=timeout_override or 3600)
+  client = Anthropic(timeout=timeout_override or 3600 * 3)
 
   try:
     # Build request parameters using shared helper

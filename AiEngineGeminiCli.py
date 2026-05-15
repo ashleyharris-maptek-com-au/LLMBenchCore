@@ -188,7 +188,7 @@ class GeminiCliEngine:
                model: str,
                reasoning=False,
                tools=False,
-               timeout: int = 3600,
+               timeout: int = 3600 * 3,
                emit_meta: bool = False):
     self.model = model
     self.reasoning = reasoning

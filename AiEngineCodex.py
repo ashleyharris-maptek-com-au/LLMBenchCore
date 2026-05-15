@@ -280,7 +280,7 @@ def _codex_ai_hook(prompt: str,
                                input=prompt_input,
                                capture_output=True,
                                text=True,
-                               timeout=timeout_override or 3600,
+                               timeout=timeout_override or 3600 * 3,
                                encoding="utf-8",
                                errors="replace",
                                env=e)
