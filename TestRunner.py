@@ -46,6 +46,19 @@ API_TIMEOUT_OVERRIDE: int | None = None
 # Global reference to current benchmark runner instance (set by subclass)
 _current_runner = None
 
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+_REPORT_IMAGE_DATA_URI_RE = re.compile(
+  r"(?P<quote>['\"])data:(?P<mime>image/(?:png|jpe?g|gif|webp|svg\+xml));base64,(?P<data>[A-Za-z0-9+/=\r\n]+)(?P=quote)",
+  re.IGNORECASE)
+_REPORT_IMAGE_EXT_BY_MIME = {
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "image/jpg": ".jpg",
+  "image/gif": ".gif",
+  "image/webp": ".webp",
+  "image/svg+xml": ".svg",
+}
+
 
 def is_placebo_model(model_name: str) -> bool:
   for cfg in ALL_MODEL_CONFIGS:
@@ -59,6 +72,82 @@ def get_model_config_by_name(model_name: str) -> Optional[Dict[str, Any]]:
     if cfg.get("name") == model_name:
       return cfg
   return None
+
+
+def _is_repo_static_asset(path: str) -> bool:
+  """Return true for files that will be served alongside GitHub Pages reports."""
+  try:
+    abs_path = os.path.abspath(path)
+    rel = os.path.relpath(abs_path, _REPO_ROOT)
+  except Exception:
+    return False
+  if rel.startswith("..") or os.path.isabs(rel):
+    return False
+  first = rel.split(os.sep, 1)[0]
+  return first in {"results", "images", "reference_images"}
+
+
+def _report_image_asset_path(aiEngineName: str, data: bytes, mime_type: str) -> str:
+  mime_type = mime_type.lower()
+  ext = _REPORT_IMAGE_EXT_BY_MIME.get(mime_type, ".img")
+  digest = hashlib.sha256(data).hexdigest()
+  out_dir = os.path.join(rp.model_root(aiEngineName), "report_assets", "images")
+  os.makedirs(out_dir, exist_ok=True)
+  out_path = os.path.join(out_dir, digest[:24] + ext)
+  if not os.path.exists(out_path):
+    with open(out_path, "wb") as f:
+      f.write(data)
+  return out_path
+
+
+def _report_image_href_from_bytes(aiEngineName: str, data: bytes, mime_type: str) -> str:
+  out_path = _report_image_asset_path(aiEngineName, data, mime_type)
+  return html.escape(rp.relative_path_from_model_root(out_path, aiEngineName), quote=True)
+
+
+def _report_image_href(path: str, aiEngineName: str) -> Optional[str]:
+  if not path or not os.path.exists(path):
+    return None
+  try:
+    if _is_repo_static_asset(path):
+      rel = rp.relative_path_from_model_root(path, aiEngineName)
+    else:
+      with open(path, "rb") as f:
+        data = f.read()
+      ext = os.path.splitext(path)[1].lower()
+      mime_type = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".svg": "image/svg+xml",
+      }.get(ext, "image/png")
+      rel = rp.relative_path_from_model_root(_report_image_asset_path(aiEngineName, data,
+                                                                      mime_type), aiEngineName)
+    return html.escape(rel.replace("\\", "/"), quote=True)
+  except Exception:
+    try:
+      return html.escape(rp.relative_path_from_model_root(path, aiEngineName), quote=True)
+    except Exception:
+      return None
+
+
+def _externalize_report_data_uri_images(fragment: str, aiEngineName: str) -> str:
+  if not isinstance(fragment, str) or "data:image" not in fragment:
+    return fragment
+
+  def replace(match: re.Match) -> str:
+    mime_type = match.group("mime").lower()
+    encoded = re.sub(r"\s+", "", match.group("data"))
+    try:
+      data = base64.b64decode(encoded)
+      href = _report_image_href_from_bytes(aiEngineName, data, mime_type)
+    except Exception:
+      return match.group(0)
+    quote = match.group("quote")
+    return quote + href + quote
+
+  return _REPORT_IMAGE_DATA_URI_RE.sub(replace, fragment)
 
 
 def _normalize_hook_response(raw_response: Any) -> tuple[Any, str, Optional[dict]]:
@@ -1841,7 +1930,7 @@ window.VizManager = (function() {
         results_file.write("    <td>")
 
         if "output_hyperlink" in subpass and subpass['output_hyperlink']:
-          results_file.write(f"<a href='{subpass['output_hyperlink']}'>")
+          results_file.write(f"<a href='{html.escape(str(subpass['output_hyperlink']), quote=True)}'>")
         if ('output_additional_images' in subpass and subpass['output_additional_images']
             and os.path.exists(subpass['output_additional_images'][0])
             and os.path.exists(subpass['output_image'])):
@@ -1849,10 +1938,11 @@ window.VizManager = (function() {
           all_images = [subpass['output_image']] + [
             img for img in subpass['output_additional_images'] if os.path.exists(img)
           ]
-          img_data_list = []
+          img_href_list = []
           for img_path in all_images:
-            with open(img_path, 'rb') as img_file:
-              img_data_list.append(base64.b64encode(img_file.read()).decode('utf-8'))
+            img_href = _report_image_href(img_path, aiEngineName)
+            if img_href:
+              img_href_list.append(img_href)
 
           # Generate unique viewer ID
           viewer_id = f"flickbook-{hashlib.md5(subpass['output_image'].encode()).hexdigest()[:12]}"
@@ -1860,16 +1950,16 @@ window.VizManager = (function() {
 
           # Build radio inputs (hidden)
           inputs_html = []
-          for idx in range(len(img_data_list)):
+          for idx in range(len(img_href_list)):
             checked = " checked" if idx == 0 else ""
             inputs_html.append(
               f'<input type="radio" name="{radio_name}" id="{viewer_id}-{idx}"{checked}>')
 
           # Build prev/next labels
           labels_html = []
-          for idx in range(len(img_data_list)):
-            prev_idx = (idx - 1) % len(img_data_list)
-            next_idx = (idx + 1) % len(img_data_list)
+          for idx in range(len(img_href_list)):
+            prev_idx = (idx - 1) % len(img_href_list)
+            next_idx = (idx + 1) % len(img_href_list)
             labels_html.append(
               f'<label class="fb-prev prev-{idx}" for="{viewer_id}-{prev_idx}">&#8592;</label>')
             labels_html.append(
@@ -1877,43 +1967,45 @@ window.VizManager = (function() {
 
           # Build image tags
           image_tags = []
-          for idx, img_b64 in enumerate(img_data_list):
+          for idx, img_href in enumerate(img_href_list):
             image_tags.append(
-              f'<img src="data:image/png;base64,{img_b64}" class="fb-view view-{idx}" alt="Output">'
-            )
+              f'<img src="{img_href}" class="fb-view view-{idx}" alt="Output">')
 
-          # Build CSS rules
-          style_lines = [
-            f'#{viewer_id} {{ display:flex; align-items:center; gap:8px; }}',
-            f'#{viewer_id} input[type="radio"] {{ display:none; }}',
-            f'#{viewer_id} .fb-frame {{ flex:1; text-align:center; order:1; }}',
-            f'#{viewer_id} .fb-prev {{ order:0; cursor:pointer; font-size:18px; display:none; user-select:none; }}',
-            f'#{viewer_id} .fb-next {{ order:2; cursor:pointer; font-size:18px; display:none; user-select:none; }}',
-            f'#{viewer_id} .fb-view {{ display:none; max-width:100%; }}',
-          ]
-          for idx in range(len(img_data_list)):
-            style_lines.append(
-              f'#{viewer_id}-{idx}:checked ~ .fb-frame .view-{idx} {{ display:block; }}')
-            style_lines.append(
-              f'#{viewer_id}-{idx}:checked ~ .prev-{idx} {{ display:inline-flex; }}')
-            style_lines.append(
-              f'#{viewer_id}-{idx}:checked ~ .next-{idx} {{ display:inline-flex; }}')
+          if not image_tags:
+            results_file.write("Image not found")
+          else:
+            # Build CSS rules
+            style_lines = [
+              f'#{viewer_id} {{ display:flex; align-items:center; gap:8px; }}',
+              f'#{viewer_id} input[type="radio"] {{ display:none; }}',
+              f'#{viewer_id} .fb-frame {{ flex:1; text-align:center; order:1; }}',
+              f'#{viewer_id} .fb-prev {{ order:0; cursor:pointer; font-size:18px; display:none; user-select:none; }}',
+              f'#{viewer_id} .fb-next {{ order:2; cursor:pointer; font-size:18px; display:none; user-select:none; }}',
+              f'#{viewer_id} .fb-view {{ display:none; max-width:100%; }}',
+            ]
+            for idx in range(len(img_href_list)):
+              style_lines.append(
+                f'#{viewer_id}-{idx}:checked ~ .fb-frame .view-{idx} {{ display:block; }}')
+              style_lines.append(
+                f'#{viewer_id}-{idx}:checked ~ .prev-{idx} {{ display:inline-flex; }}')
+              style_lines.append(
+                f'#{viewer_id}-{idx}:checked ~ .next-{idx} {{ display:inline-flex; }}')
 
-          results_file.write(f'<div id="{viewer_id}" class="flickbook-viewer">'
-                             f'<style>{" ".join(style_lines)}</style>'
-                             f'{"".join(inputs_html)}'
-                             f'{"".join(labels_html)}'
-                             f'<div class="fb-frame">{"".join(image_tags)}</div>'
-                             f'</div>')
+            results_file.write(f'<div id="{viewer_id}" class="flickbook-viewer">'
+                               f'<style>{" ".join(style_lines)}</style>'
+                               f'{"".join(inputs_html)}'
+                               f'{"".join(labels_html)}'
+                               f'<div class="fb-frame">{"".join(image_tags)}</div>'
+                               f'</div>')
 
         elif os.path.exists(subpass['output_image']):
-          try:
-            with open(subpass['output_image'], 'rb') as img_file:
-              img_data = base64.b64encode(img_file.read()).decode('utf-8')
-              results_file.write(f"<img src='data:image/png;base64,{img_data}' alt='Output'>")
-          except:
+          output_href = _report_image_href(subpass['output_image'], aiEngineName)
+          if output_href:
+            results_file.write(f"<img src='{output_href}' alt='Output'>")
+          else:
             output_rel = rp.relative_path_from_model_root(subpass['output_image'], aiEngineName)
-            results_file.write(f"<a href='{output_rel}'>View Output Image</a>")
+            results_file.write(
+              f"<a href='{html.escape(output_rel, quote=True)}'>View Output Image</a>")
         else:
           results_file.write("Image not found")
 
@@ -1925,23 +2017,24 @@ window.VizManager = (function() {
         results_file.write("    <td>")
         if 'reference_image' in subpass and subpass['reference_image'] and os.path.exists(
             subpass['reference_image']):
-          try:
-            with open(subpass['reference_image'], 'rb') as img_file:
-              img_data = base64.b64encode(img_file.read()).decode('utf-8')
-              results_file.write(f"<img src='data:image/png;base64,{img_data}' alt='Reference'>")
-          except:
+          reference_href = _report_image_href(subpass['reference_image'], aiEngineName)
+          if reference_href:
+            results_file.write(f"<img src='{reference_href}' alt='Reference'>")
+          else:
             reference_rel = rp.relative_path_from_model_root(subpass['reference_image'],
                                                              aiEngineName)
-            results_file.write(f"<a href='{reference_rel}'>View Reference Image</a>")
+            results_file.write(
+              f"<a href='{html.escape(reference_rel, quote=True)}'>View Reference Image</a>")
         else:
           results_file.write("No reference image")
         results_file.write("</td>\n")
       elif "output_nice" in subpass:
         # Nice preformatted output, if it contains table cells just display as is:
-        if "</td><td>" in subpass["output_nice"]:
-          results_file.write(subpass["output_nice"])
+        output_nice = _externalize_report_data_uri_images(subpass["output_nice"], aiEngineName)
+        if "</td><td>" in output_nice:
+          results_file.write(output_nice)
         else:
-          results_file.write("    <td colspan='2'>" + subpass["output_nice"] + "</td>\n")
+          results_file.write("    <td colspan='2'>" + output_nice + "</td>\n")
       elif "output_text" in subpass:
         # Text output only
         results_file.write(
