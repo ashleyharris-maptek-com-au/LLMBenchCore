@@ -1,3 +1,4 @@
+import random
 import subprocess
 import matplotlib
 
@@ -9,14 +10,21 @@ import os
 import base64
 import hashlib
 import html
+import importlib
 import time
 import argparse
 import datetime
 import json
+import re
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from filelock import FileLock
 from .CacheLayer import CacheLayer as cl
+# Bind the submodule explicitly. `from . import CacheLayer` would resolve to the
+# CacheLayer *class* (re-exported by __init__.py), which shadows the submodule
+# and silently turns module-flag writes like FORCE_REFRESH=True into harmless
+# class-attribute assignments.
+_CacheLayerModule = importlib.import_module("LLMBenchCore.CacheLayer")
 from . import ResultPaths as rp
 from ._prompt_utils import apply_prompt_prefix, resolve_prompt_prefix
 
@@ -276,6 +284,57 @@ def _config_name(model: str, reasoning, tools) -> str:
   return name
 
 
+def _model_name_match_key(name: str) -> str:
+  normalized = name.strip().lower()
+  normalized = normalized.replace("mediumreasoning", "medreasoning")
+  normalized = normalized.replace("maxreasoning", "maxreasoning")
+  return re.sub(r"[^a-z0-9*?]+", "", normalized)
+
+
+def _resolve_model_name_alias(pattern: str, all_model_names: List[str]) -> Optional[str]:
+  exact_match = next((name for name in all_model_names if name.lower() == pattern.lower()), None)
+  if exact_match:
+    return exact_match
+
+  pattern_key = _model_name_match_key(pattern)
+  alias_matches = [name for name in all_model_names if _model_name_match_key(name) == pattern_key]
+  if len(alias_matches) == 1:
+    return alias_matches[0]
+  return None
+
+
+def _default_parallel_worker_count() -> int:
+  return min(os.cpu_count() or 1, 16)
+
+
+def _parse_parallel_worker_count(value: str) -> int:
+  try:
+    count = int(value)
+  except ValueError as e:
+    raise argparse.ArgumentTypeError("--parallel expects a positive integer") from e
+  if count < 1:
+    raise argparse.ArgumentTypeError("--parallel expects a positive integer")
+  return count
+
+
+def _remove_parallel_args(cli_args: List[str]) -> List[str]:
+  result = []
+  i = 0
+  while i < len(cli_args):
+    arg = cli_args[i]
+    if arg == "--parallel":
+      i += 1
+      if i < len(cli_args) and not cli_args[i].startswith("-"):
+        i += 1
+      continue
+    if arg.startswith("--parallel="):
+      i += 1
+      continue
+    result.append(arg)
+    i += 1
+  return result
+
+
 def get_default_model_configs() -> List[Any]:
   """
   Returns the default list of engines.
@@ -303,8 +362,9 @@ def get_default_model_configs() -> List[Any]:
   ])
 
   openai_base_models = [
-    "gpt-5-nano", "gpt-5-mini", "gpt-5-codex", "gpt-5.1", "gpt-5.1-codex", "gpt-5.1-codex-max",
-    "gpt-5.2", "gpt-5.2-codex", "gpt-5.2-pro", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-pro", "gpt-5.5"
+    "gpt-5-nano", "gpt-5-mini", "gpt-5.4-mini", "gpt-5-codex", "gpt-5.1", "gpt-5.1-codex",
+    "gpt-5.1-codex-max", "gpt-5.2", "gpt-5.2-codex", "gpt-5.2-pro", "gpt-5.3-codex", "gpt-5.4",
+    "gpt-5.4-pro", "gpt-5.5"
   ]
   for model in openai_base_models:
     for reasoning in [0, 2, 4, 6, 9]:
@@ -317,24 +377,30 @@ def get_default_model_configs() -> List[Any]:
           "tools": tools,
         })
 
-  # ── Gemini  (Gemini CLI → direct API) ───────────────────────────────────
-  from .AiEngineGeminiCli import GeminiCliEngine
+  gemini_factories = []
+  try:
+    from .AiEngineGeminiCli import GeminiCliEngine
+    gemini_factories.append(GeminiCliEngine)
+  except ImportError:
+    pass
   from .AiEngineGoogleGemini import GeminiEngine
 
-  gemini_mux = AiEngineMultiplexerFactory([
-    GeminiCliEngine,
-    GeminiEngine,
-  ])
+  gemini_factories.append(GeminiEngine)
+  gemini_mux = AiEngineMultiplexerFactory(gemini_factories)
 
   gemini_base_models = [
+    "gemma-4-31b-it",
     "gemini-2.5-flash-lite",
+    "gemini-3.1-flash-lite-preview",
     "gemini-2.5-flash",
     "gemini-3-flash-preview",
+    "gemini-2.5-pro",
     "gemini-3-pro-preview",
     "gemini-3.1-pro-preview",
   ]
   for model in gemini_base_models:
     for reasoning in [0, 2, 4, 6, 9]:
+      if model == "gemini-2.5-pro" and reasoning == 0: continue
       for tools in [True, False]:
         configs.append({
           "name": _config_name(model, reasoning, tools),
@@ -344,13 +410,17 @@ def get_default_model_configs() -> List[Any]:
           "tools": tools,
         })
 
-  # ── Anthropic  (Claude CLI → Bedrock → direct API) ─────────────────────
-  from .AiEngineClaudeCli import ClaudeCliEngine
+  anthropic_factories = []
+  try:
+    from .AiEngineClaudeCli import ClaudeCliEngine
+    anthropic_factories.append(ClaudeCliEngine)
+  except ImportError:
+    pass
   from .AiEngineAmazonBedrock import BedrockEngine
   from .AiEngineAnthropicClaude import ClaudeEngine
 
-  # Mapping from Anthropic model names to Bedrock model IDs
   _ANTHROPIC_BEDROCK_MAP = {
+    "claude-haiku-4-5": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     "claude-sonnet-4-5": "us.anthropic.claude-sonnet-4-5-v1:0",
     "claude-sonnet-4-6": "us.anthropic.claude-sonnet-4-6-v1:0",
     "claude-opus-4-5": "us.anthropic.claude-opus-4-5-v1:0",
@@ -362,15 +432,12 @@ def get_default_model_configs() -> List[Any]:
     bedrock_id = _ANTHROPIC_BEDROCK_MAP.get(m, f"us.anthropic.{m}-v1:0")
     return BedrockEngine(bedrock_id, r, t, region="us-east-1")
 
-  anthropic_mux = AiEngineMultiplexerFactory([
-    ClaudeCliEngine,
-    _bedrock_claude_factory,
-    ClaudeEngine,
-  ])
+  anthropic_factories.extend([_bedrock_claude_factory, ClaudeEngine])
+  anthropic_mux = AiEngineMultiplexerFactory(anthropic_factories)
 
   anthropic_base_models = [
-    "claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-4-5", "claude-opus-4-6",
-    "claude-opus-4-7"
+    "claude-haiku-4-5", "claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-4-5",
+    "claude-opus-4-6", "claude-opus-4-7"
   ]
   for model in anthropic_base_models:
     for reasoning in [0, 2, 4, 6, 9]:
@@ -382,15 +449,17 @@ def get_default_model_configs() -> List[Any]:
           "reasoning": reasoning,
           "tools": tools,
         })
-
-  # ── Grok / xAI  (Grok CLI → direct API) ────────────────────────────────
-  from .AiEngineGrokCli import GrokCliEngine
+  """
+  grok_factories = []
+  try:
+    from .AiEngineGrokCli import GrokCliEngine
+    grok_factories.append(GrokCliEngine)
+  except ImportError:
+    pass
   from .AiEngineXAIGrok import GrokEngine
 
-  grok_mux = AiEngineMultiplexerFactory([
-    GrokCliEngine,
-    GrokEngine,
-  ])
+  grok_factories.append(GrokEngine)
+  grok_mux = AiEngineMultiplexerFactory(grok_factories)
 
   grok_configs = [
     ("grok-4-1-fast-non-reasoning", "grok-4-1-fast-non-reasoning", False, False),
@@ -459,6 +528,7 @@ def get_default_model_configs() -> List[Any]:
       "base_url": os.environ.get("LLAMACPP_BASE_URL"),
       "env_key": "LLAMACPP_BASE_URL",
     })
+  """
 
   return configs
 
@@ -471,7 +541,8 @@ def create_argument_parser(runner: BenchmarkRunner) -> argparse.ArgumentParser:
 Examples:
   python <script>.py                          # Run all tests on all available models
   python <script>.py --setup                  # Download/build reference data (run first!)
-  python <script>.py --parallel               # Run all models in parallel
+  python <script>.py --parallel               # Run models in parallel, bounded by CPU cores
+  python <script>.py --parallel 4             # Run at most 4 models at once
   python <script>.py --list-models            # List all available model names
   python <script>.py -t 1,2,3                 # Run only tests 1, 2, 3
   python <script>.py -t 5-10                  # Run tests 5 through 10
@@ -513,7 +584,14 @@ Examples:
                       action="store_true",
                       help="Only use cached results. Do not make any API calls.")
   parser.add_argument("--unskip", action="store_true", help="Run tests that are currently skipped.")
-  parser.add_argument("--parallel", action="store_true", help="Run all models in parallel")
+  parser.add_argument("--parallel",
+                      nargs="?",
+                      const=_default_parallel_worker_count(),
+                      default=None,
+                      type=_parse_parallel_worker_count,
+                      metavar="N",
+                      help="Run all models in parallel, with at most N models at once "
+                      f"(default: {_default_parallel_worker_count()})")
   parser.add_argument("--ignore-cached-failures",
                       action="store_true",
                       help="Ignore cached empty/error results")
@@ -575,16 +653,14 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
 
   # Handle global flags
   if args.ignore_cached_failures:
-    from . import CacheLayer
-    CacheLayer.IGNORE_CACHED_FAILURES = True
+    _CacheLayerModule.IGNORE_CACHED_FAILURES = True
     IGNORE_CACHED_FAILURES = True
     print(
       "Ignore cached failures: Cached results that are empty, bailed or errored out will be ignored."
     )
 
   if args.force:
-    from . import CacheLayer
-    CacheLayer.FORCE_REFRESH = True
+    _CacheLayerModule.FORCE_REFRESH = True
     FORCE_ARG = True
     print("Force mode: AI response cache will be bypassed (new responses still cached)")
 
@@ -598,8 +674,7 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
     print("Perfect-score propagation enabled for these models: {}".format(pt))
 
   if args.offline:
-    from . import CacheLayer
-    CacheLayer.OFFLINE_MODE = True
+    _CacheLayerModule.OFFLINE_MODE = True
     print("Offline mode: No API calls will be made, cache only.")
 
   if args.api_timeout is not None:
@@ -628,18 +703,42 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
   ALL_MODEL_CONFIGS.extend(all_configs)
 
   # Handle --parallel mode
-  if args.parallel:
+  if args.parallel is not None:
     if args.models:
-      print("--parallel and --models aren't compatible")
-    cli_args = sys.argv[1:]
-    cli_args.remove("--parallel")
+      parser.error("--parallel and --models aren't compatible")
 
-    tasks = []
-    for config in all_configs:
-      tasks.append(subprocess.Popen([sys.executable, script_file, "-m", config["name"], *cli_args]))
-    for task in tasks:
-      task.wait()
-    sys.exit(0)
+    parallel_workers = args.parallel
+    cli_args = _remove_parallel_args(sys.argv[1:])
+    print(f"Parallel mode: running up to {parallel_workers} model(s) at a time")
+
+    def run_parallel_model(config: Dict[str, Any]) -> int:
+      model_name = config["name"]
+      print(f"[parallel] starting {model_name}")
+      completed = subprocess.run([sys.executable, script_file, "-m", model_name, *cli_args])
+      if completed.returncode == 0:
+        print(f"[parallel] finished {model_name}")
+      else:
+        print(f"[parallel] failed {model_name} with exit code {completed.returncode}")
+      return completed.returncode
+
+    random.shuffle(all_configs)
+
+    exit_code = 0
+    with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
+      future_to_config = {
+        executor.submit(run_parallel_model, config): config
+        for config in all_configs
+      }
+      for future in as_completed(future_to_config):
+        config = future_to_config[future]
+        try:
+          result_code = future.result()
+        except Exception as e:
+          print(f"[parallel] failed {config['name']} with exception: {e}")
+          result_code = 1
+        if result_code != 0 and exit_code == 0:
+          exit_code = result_code
+    sys.exit(exit_code)
 
   # Handle --list-models
   if args.list_models:
@@ -703,8 +802,7 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
           print(f"Warning: Pattern '{pattern}' did not match any models")
         matched_models.update(matches)
       else:
-        exact_match = next((name for name in all_model_names if name.lower() == pattern.lower()),
-                           None)
+        exact_match = _resolve_model_name_alias(pattern, all_model_names)
         if exact_match:
           matched_models.add(exact_match)
         else:
@@ -772,10 +870,12 @@ def checkSavedPromptCache(aiEngineName: str, index: int, subPass: int, prompt: s
   if is_placebo_model(aiEngineName):
     return None
 
+  model_config = get_model_config_by_name(aiEngineName)
+  if model_config and not isinstance(model_config.get("engine"), str):
+    return None
+
   # Check both FORCE_ARG and the module's FORCE_REFRESH for robustness
-  import sys
-  cache_module = sys.modules.get('LLMBenchCore.CacheLayer')
-  if FORCE_ARG or (cache_module and getattr(cache_module, 'FORCE_REFRESH', False)):
+  if FORCE_ARG or getattr(_CacheLayerModule, 'FORCE_REFRESH', False):
     return None
 
   prompt_file, result_file = selected_pair
@@ -798,8 +898,19 @@ def checkSavedPromptCache(aiEngineName: str, index: int, subPass: int, prompt: s
       # Results are saved with str(result), so use ast.literal_eval to parse
       import ast
       try:
-        return ast.literal_eval(saved_result)
+        parsed_result = ast.literal_eval(saved_result)
+        if parsed_result in (None, "", {}):
+          print(f"Ignoring prompt cache failure artifact for {aiEngineName} Q{index}/S{subPass}")
+          return None
+        if isinstance(parsed_result, dict) and (parsed_result.get("__exception__")
+                                                or parsed_result.get("__content_violation__")):
+          print(f"Ignoring prompt cache exception artifact for {aiEngineName} Q{index}/S{subPass}")
+          return None
+        return parsed_result
       except:
+        if not saved_result.strip():
+          print(f"Ignoring empty prompt cache artifact for {aiEngineName} Q{index}/S{subPass}")
+          return None
         return saved_result
   except Exception as e:
     print(f"Error checking saved prompt cache: {e}")
@@ -1989,9 +2100,15 @@ window.VizManager = (function() {
   for i in range(df.shape[0]):
     e = di["Engine"][i]
 
-    e = e.replace("-HighReasoning", "+R")
-    e = e.replace("-Reasoning-Tools", "+RT")
+    e = e.replace("-HighReasoning", "+HR")
+    e = e.replace("-MidReasoning", "+MR")
+    e = e.replace("-MedReasoning", "+MR")
+    e = e.replace("-LowReasoning", "+LR")
+    e = e.replace("-MaxReasoning", "+XR")
+    e = e.replace("-Tools", "+T")
     e = e.replace("-bedrock", "")
+    e = e.replace("-preview", "")
+    e = e.replace("claude-", "")
     di["Engine"][i] = e
 
   df = df.from_dict(di)

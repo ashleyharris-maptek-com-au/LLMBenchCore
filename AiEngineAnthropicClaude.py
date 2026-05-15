@@ -237,6 +237,8 @@ def _claude_ai_hook(prompt: str,
     
     There is no memory between calls to this function, the 'conversation' doesn't persist.
     """
+  assert False, "Can't run here - we're trying to get this working in claude code CLI."
+
   from anthropic import Anthropic
 
   # Initialize the client - it will automatically use ANTHROPIC_API_KEY environment variable

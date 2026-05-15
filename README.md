@@ -277,8 +277,11 @@ python your_benchmark.py -t 5-10
 python your_benchmark.py -m gpt-5-nano
 python your_benchmark.py -m "claude-*"
 
-# Run in parallel 
+# Run in parallel (defaults to min(cpu cores, 16) models at a time)
 python your_benchmark.py --parallel
+
+# Run at most 4 models at a time
+python your_benchmark.py --parallel 4
 
 # List available models
 python your_benchmark.py --list-models

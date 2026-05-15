@@ -371,7 +371,6 @@ def run_batch_mode(runner, test_filter=None, model_filter=None, poll_interval=60
     poll_interval: Seconds between batch status polls (default: 60)
     force_mode: Whether --force was specified (will be disabled after batch completes)
   """
-  from . import CacheLayer
   from .TestRunner import ALL_MODEL_CONFIGS
 
   print("\n" + "=" * 60)
@@ -404,7 +403,7 @@ def run_batch_mode(runner, test_filter=None, model_filter=None, poll_interval=60
   # If everything was cached, skip to final phase
   if prompts_gathered == 0:
     print("[Batch] All prompts already cached, skipping batch submission")
-    CacheLayer.FORCE_REFRESH = False
+    CacheModule.FORCE_REFRESH = False
     runner.run(test_filter, model_filter)
     print("\n" + "=" * 60)
     print("BATCH MODE COMPLETE (all from cache)")
@@ -467,7 +466,7 @@ def run_batch_mode(runner, test_filter=None, model_filter=None, poll_interval=60
 
   # Phase 6: Disable force mode so cached results are used
   print("\n[Batch] Phase 6: Processing results (cache mode)...")
-  CacheLayer.FORCE_REFRESH = False
+  CacheModule.FORCE_REFRESH = False
 
   # Phase 7: Run normal benchmark (will hit cache)
   runner.run(test_filter, model_filter)

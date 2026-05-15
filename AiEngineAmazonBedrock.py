@@ -70,6 +70,8 @@ class BedrockEngine:
 
   def AIHook(self, prompt: str, structure: dict | None) -> tuple:
     """Call the Bedrock API with instance configuration."""
+    assert False, "Can't run here - we're trying to get this working in claude code CLI."
+
     return _bedrock_ai_hook(prompt,
                             structure,
                             self.model,

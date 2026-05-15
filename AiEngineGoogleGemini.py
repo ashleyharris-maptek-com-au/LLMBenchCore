@@ -326,6 +326,7 @@ def _gemini_ai_hook(prompt: str,
     
     Returns tuple of (result, chainOfThought).
     """
+  assert False, "Can't run here - we're trying to get this working in gemini CLI."
   # Initialize the client - it will automatically use the GEMINI_API_KEY or GOOGLE_API_KEY
   # environment variable
   client = genai.Client()
