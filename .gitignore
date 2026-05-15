@@ -52,3 +52,6 @@ blocked_prompts.json
 # OS files
 .DS_Store
 Thumbs.db
+
+# Temporary worksites for CLI clients.
+llmbench_*
