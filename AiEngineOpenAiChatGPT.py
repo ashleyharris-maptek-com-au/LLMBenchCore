@@ -246,7 +246,6 @@ def _openai_ai_hook(prompt: str,
     
     Uses the OpenAI Responses API.
     """
-  assert False, "Can't run here - we're trying to get this working in codex."
 
   if engine_instance.forcedFailure:
     return {"error": "Forced failure"}, "Forced failure due to API instability"
