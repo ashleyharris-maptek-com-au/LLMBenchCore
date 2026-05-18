@@ -209,6 +209,20 @@ def _read_cache_file(cache_file: str):
         pass
       return None
 
+    # Catch cases where some thinking was kept, but the output was empty. This occurs in many
+    # engines when you run out of API credits halfway through a call, or when an answer got
+    # cut-off mid thought.
+    if isinstance(cached_json, list) and len(cached_json) == 2 and isinstance(cached_json[0], str):
+      if len(cached_json[0]) <= 2 and IGNORE_CACHED_FAILURES:
+        print(f"IGNORE_CACHED_FAILURES set, cached result was too short: '{cached_json[0]}'")
+        print(f"Cached answer had {len(cached_json[1])} bytes of reasoning - this may indicate ")
+        print("an answer trimmed due to token limits - check the engine configuration.")
+        try:
+          os.unlink(cache_file)
+        except:
+          pass
+        return None
+
     if len(cached_json) > 0:
       return cached_json
     return None

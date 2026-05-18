@@ -101,6 +101,54 @@ def build_llamacpp_messages(prompt: str) -> list[dict]:
 
 mutex = threading.Lock()
 
+_MAX_TOOL_ITERATIONS = 10
+
+
+def _build_llamacpp_final_answer_prompt(structure: dict | None,
+                                        reason: str = "previous response ended without visible answer text"
+                                       ) -> str:
+  prefix = f"{reason.capitalize()}. "
+  if structure is not None:
+    return (prefix + "Do not call more tools. Do not do extra thinking. Return your final answer "
+            "now as JSON matching the required schema. Return only the JSON object.")
+  return (prefix + "Do not call more tools. Do not do extra thinking. Return your final answer "
+          "now.")
+
+
+def _llamacpp_post(api_url: str, payload: dict, headers: dict, timeout: int) -> dict:
+  response = requests.post(api_url, json=payload, headers=headers, timeout=timeout)
+  response.raise_for_status()
+  return response.json()
+
+
+def _request_llamacpp_final_answer(api_url: str,
+                                   payload: dict,
+                                   headers: dict,
+                                   timeout: int,
+                                   structure: dict | None,
+                                   reason: str) -> str:
+  final_payload = json.loads(json.dumps(payload))
+  final_payload["messages"].append({
+    "role": "user",
+    "content": _build_llamacpp_final_answer_prompt(structure, reason)
+  })
+  final_payload.pop("tools", None)
+  final_payload.pop("tool_choice", None)
+  if structure is not None:
+    final_payload["response_format"] = {
+      "type": "json_schema",
+      "json_schema": {
+        "name": "response",
+        "strict": True,
+        "schema": structure
+      }
+    }
+  result_json = _llamacpp_post(api_url, final_payload, headers, timeout)
+  choices = result_json.get("choices", [])
+  if not choices:
+    return ""
+  return choices[0].get("message", {}).get("content", "") or ""
+
 def _llamacpp_ai_hook(prompt: str, structure: dict | None, model: str, base_url: str, 
                       timeout: int, tools=False) -> tuple:
  """
@@ -158,16 +206,12 @@ def _llamacpp_ai_hook(prompt: str, structure: dict | None, model: str, base_url:
     
     # Tool calling loop - continue until we get a final response (no tool calls)
     chainOfThought = ""
-    max_tool_iterations = 10
     iteration = 0
     
-    while iteration < max_tool_iterations:
+    while iteration < _MAX_TOOL_ITERATIONS:
       iteration += 1
       
-      response = requests.post(api_url, json=payload, headers=headers, timeout=timeout)
-      response.raise_for_status()
-      
-      result_json = response.json()
+      result_json = _llamacpp_post(api_url, payload, headers, timeout)
       
       # Extract the response content
       choices = result_json.get("choices", [])
@@ -215,6 +259,16 @@ def _llamacpp_ai_hook(prompt: str, structure: dict | None, model: str, base_url:
       
       # No tool calls - this is the final response
       output_text = message.get("content", "") or ""
+      if not output_text.strip():
+        print("Warning: llama.cpp produced no visible answer text; requesting final answer turn.")
+        output_text = _request_llamacpp_final_answer(
+          api_url,
+          payload,
+          headers,
+          timeout,
+          structure,
+          reason="previous response ended without visible answer text",
+        )
       
       # Parse structured output if requested
       if structure is not None:
@@ -238,13 +292,21 @@ def _llamacpp_ai_hook(prompt: str, structure: dict | None, model: str, base_url:
             }
           }
           
-          format_response = requests.post(api_url, json=payload, headers=headers, timeout=timeout)
-          format_response.raise_for_status()
-          format_result = format_response.json()
+          format_result = _llamacpp_post(api_url, payload, headers, timeout)
           
           format_choices = format_result.get("choices", [])
           if format_choices:
             output_text = format_choices[0].get("message", {}).get("content", "")
+          if not output_text.strip():
+            print("Warning: llama.cpp JSON formatting turn returned no visible answer text.")
+            output_text = _request_llamacpp_final_answer(
+              api_url,
+              payload,
+              headers,
+              timeout,
+              structure,
+              reason="previous response ended without visible answer text",
+            )
         
         try:
           # Strip markdown code blocks if present
@@ -269,10 +331,31 @@ def _llamacpp_ai_hook(prompt: str, structure: dict | None, model: str, base_url:
         return output_text or "", chainOfThought
     
     # Max iterations reached
-    print(f"Warning: Max tool iterations ({max_tool_iterations}) reached")
+    print(f"Warning: Max tool iterations ({_MAX_TOOL_ITERATIONS}) reached")
+    output_text = _request_llamacpp_final_answer(
+      api_url,
+      payload,
+      headers,
+      timeout,
+      structure,
+      reason="tool round limit reached",
+    )
     if structure is not None:
-      return {}, chainOfThought
-    return "", chainOfThought
+      try:
+        parse_text = output_text
+        if "```json" in parse_text:
+          parse_text = parse_text.split("```json", 1)[1].split("```", 1)[0]
+        elif "```" in parse_text:
+          parse_text = parse_text.split("```", 1)[1].split("```", 1)[0]
+        return json.loads(parse_text.strip()), chainOfThought
+      except json.JSONDecodeError:
+        import json_repair
+        try:
+          repaired = json_repair.repair_json(output_text)
+          return json.loads(repaired), chainOfThought
+        except Exception:
+          return {}, chainOfThought
+    return output_text or "", chainOfThought
     
   except requests.exceptions.Timeout:
     print(f"Timeout calling llama.cpp server at {base_url}")

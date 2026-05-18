@@ -121,16 +121,57 @@ class BatchOrchestrator:
     self.force_refresh = force_refresh
     self.skipped_cached = 0  # Count of requests skipped due to cache
 
+  @staticmethod
+  def _resolve_engine_type(config: Dict[str, Any]) -> str:
+    """Resolve a provider name from either a string type or an engine object."""
+    explicit = config.get("engine_type")
+    if isinstance(explicit, str) and explicit:
+      return explicit
+
+    engine_value = config.get("engine", "unknown")
+    if isinstance(engine_value, str):
+      return engine_value
+
+    base_model = str(config.get("base_model", "")).lower()
+    class_name = engine_value.__class__.__name__.lower()
+    module_name = engine_value.__class__.__module__.lower()
+    descriptor = f"{module_name}.{class_name}"
+
+    if "grok" in descriptor or base_model.startswith("grok-"):
+      return "xai"
+    if ("anthropic" in descriptor or "claude" in descriptor or
+        base_model.startswith("claude-")):
+      return "anthropic"
+    if ("gemini" in descriptor or "gemma" in descriptor or
+        base_model.startswith("gemini-") or base_model.startswith("gemma-")):
+      return "gemini"
+    if ("azureopenai" in descriptor or "azure_openai" in descriptor or
+        base_model.startswith("azure-")):
+      return "azure_openai"
+    if ("openai" in descriptor or "codex" in descriptor or base_model.startswith("gpt-") or
+        base_model.startswith("o1-")):
+      return "openai"
+    if "bedrock" in descriptor:
+      return "bedrock"
+    if "zai" in descriptor or base_model.startswith("glm-"):
+      return "zai"
+    if "llamacpp" in descriptor or "llama.cpp" in descriptor:
+      return "llamacpp"
+    if "placebo" in descriptor:
+      return "placebo"
+
+    return "unknown"
+
   def supports_batch(self, engine_name: str) -> bool:
     """Check if an engine supports batch processing."""
     config = self.model_configs.get(engine_name, {})
-    engine_type = config.get("engine", "unknown")
+    engine_type = self._resolve_engine_type(config)
     return self.BATCH_SUPPORTED_ENGINES.get(engine_type, False)
 
   def get_engine_type(self, engine_name: str) -> str:
     """Get the engine type for a model config."""
     config = self.model_configs.get(engine_name, {})
-    return config.get("engine", "unknown")
+    return self._resolve_engine_type(config)
 
   def add_request(self, request: BatchRequest) -> bool:
     """
@@ -1175,6 +1216,7 @@ def _fetch_batch_results(batch_id: str, engine_type: str, config: dict) -> list:
     elif engine_type == "xai":
       # Use REST API — the gRPC batch endpoint is unreliable
       import requests as http
+      from .AiEngineXAIGrok import _extract_xai_batch_text_and_reasoning
       api_key = os.environ.get("XAI_API_KEY", "")
       headers = {"Authorization": f"Bearer {api_key}"}
       base = "https://api.x.ai/v1"
@@ -1204,12 +1246,7 @@ def _fetch_batch_results(batch_id: str, engine_type: str, config: dict) -> list:
             })
             continue
 
-          chat_completion = batch_result.get("response", {}).get("chat_get_completion", {})
-          choices = chat_completion.get("choices", [])
-          message = choices[0].get("message", {}) if choices else {}
-
-          text_content = message.get("content", "") or ""
-          cot = message.get("reasoning_content", "") or ""
+          text_content, cot = _extract_xai_batch_text_and_reasoning(batch_result)
 
           # Try to parse JSON
           result_data = text_content
