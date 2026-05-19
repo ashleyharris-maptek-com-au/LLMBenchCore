@@ -122,8 +122,8 @@ def _report_image_href(path: str, aiEngineName: str) -> Optional[str]:
         ".webp": "image/webp",
         ".svg": "image/svg+xml",
       }.get(ext, "image/png")
-      rel = rp.relative_path_from_model_root(_report_image_asset_path(aiEngineName, data,
-                                                                      mime_type), aiEngineName)
+      rel = rp.relative_path_from_model_root(
+        _report_image_asset_path(aiEngineName, data, mime_type), aiEngineName)
     return html.escape(rel.replace("\\", "/"), quote=True)
   except Exception:
     try:
@@ -458,6 +458,7 @@ def get_default_model_configs() -> List[Any]:
   for model in openai_base_models:
     for reasoning in [0, 2, 4, 6, 9]:
       for tools in [True, False]:
+        if model == "gpt-5.2-pro" and reasoning == 2: continue
         configs.append({
           "name": _config_name(model, reasoning, tools),
           "engine": openai_mux.create(model, reasoning, tools),
@@ -1930,7 +1931,8 @@ window.VizManager = (function() {
         results_file.write("    <td>")
 
         if "output_hyperlink" in subpass and subpass['output_hyperlink']:
-          results_file.write(f"<a href='{html.escape(str(subpass['output_hyperlink']), quote=True)}'>")
+          results_file.write(
+            f"<a href='{html.escape(str(subpass['output_hyperlink']), quote=True)}'>")
         if ('output_additional_images' in subpass and subpass['output_additional_images']
             and os.path.exists(subpass['output_additional_images'][0])
             and os.path.exists(subpass['output_image'])):
@@ -1968,8 +1970,7 @@ window.VizManager = (function() {
           # Build image tags
           image_tags = []
           for idx, img_href in enumerate(img_href_list):
-            image_tags.append(
-              f'<img src="{img_href}" class="fb-view view-{idx}" alt="Output">')
+            image_tags.append(f'<img src="{img_href}" class="fb-view view-{idx}" alt="Output">')
 
           if not image_tags:
             results_file.write("Image not found")
