@@ -42,7 +42,7 @@ except:
   from ToolExecutors import dispatch_tool_call as _dispatch_tool_call
 
 # Maximum number of tool-call round-trips before forcing a final answer
-_MAX_TOOL_ROUNDS = 8
+_MAX_TOOL_ROUNDS = 50
 
 # ---------------------------------------------------------------------------
 # Adaptive concurrency limiter (dynamic semaphore)
@@ -153,6 +153,11 @@ class ZaiEngine:
                                                 str(tools).encode() +
                                                 str(timeout).encode()).hexdigest()
 
+  @staticmethod
+  def Available():
+    if "ZAI_API_KEY" in os.environ: return True
+    return {"env", "ZAI_API_KEY"}
+
   def AIHook(self, prompt: str, structure: dict | None) -> tuple:
     """Call the Z-AI API with instance configuration."""
     return _zai_ai_hook(prompt,
@@ -208,6 +213,17 @@ def _build_zai_messages(prompt: str, structure: dict | None) -> list[dict]:
   return messages
 
 
+def _build_zai_final_answer_prompt(structure: dict | None,
+                                   reason: str = "tool round limit reached") -> str:
+  """Instruction used to force a final answer from the current conversation state."""
+  prefix = f"{reason.capitalize()}. "
+  if structure is not None:
+    return (prefix + "Do not call any more tools. Do not do extra thinking. Using the "
+            "information already gathered, return your final answer now as valid JSON only.")
+  return (prefix + "Do not call any more tools. Do not do extra thinking. Using the "
+          "information already gathered, return your final answer now.")
+
+
 def build_zai_chat_params(prompt: str,
                           structure: dict | None,
                           model: str,
@@ -223,9 +239,11 @@ def build_zai_chat_params(prompt: str,
   params: dict[str, Any] = {
     "model": model,
     "messages": messages,
-    "max_tokens": 16384,
+    "max_tokens": 131072,
     "temperature": 1.0,
   }
+
+  if "4.6" in model: params["max_tokens"] = 32768
 
   if stream:
     params["stream"] = True
@@ -253,6 +271,91 @@ def build_zai_chat_params(prompt: str,
       params["tool_choice"] = "auto"
 
   return params
+
+
+def _run_zai_completion(client, params: dict, messages: list[dict]) -> tuple[str, str, dict[int, dict]]:
+  """Run one Z-AI completion round and return content, reasoning, and tool calls."""
+  current_params = dict(params)
+  current_params["messages"] = messages
+
+  response = client.chat.completions.create(**current_params)
+
+  round_thinking = ""
+  round_content = ""
+  tool_calls_accumulator: dict[int, dict] = {}
+
+  if params.get("stream"):
+    thinking_line_buf = ""
+
+    for chunk in response:
+      if not chunk.choices:
+        continue
+      delta = chunk.choices[0].delta
+
+      if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+        round_thinking += delta.reasoning_content
+        thinking_line_buf += delta.reasoning_content
+        while "\n" in thinking_line_buf:
+          line, thinking_line_buf = thinking_line_buf.split("\n", 1)
+          print(f"Thinking: {line}", flush=True)
+
+      if hasattr(delta, "content") and delta.content:
+        round_content += delta.content
+
+      if hasattr(delta, "tool_calls") and delta.tool_calls:
+        for tc in delta.tool_calls:
+          idx = tc.index
+          if idx not in tool_calls_accumulator:
+            tool_calls_accumulator[idx] = {
+              "id": getattr(tc, "id", None) or "",
+              "name": "",
+              "arguments": ""
+            }
+          if tc.function:
+            if tc.function.name:
+              tool_calls_accumulator[idx]["name"] = tc.function.name
+            if tc.function.arguments:
+              tool_calls_accumulator[idx]["arguments"] += tc.function.arguments
+          if getattr(tc, "id", None):
+            tool_calls_accumulator[idx]["id"] = tc.id
+
+    if thinking_line_buf:
+      print(f"Thinking: {thinking_line_buf}", flush=True)
+  else:
+    msg = response.choices[0].message
+    round_content = msg.content or ""
+    if hasattr(msg, "reasoning_content") and msg.reasoning_content:
+      round_thinking = msg.reasoning_content
+      for line in round_thinking.split("\n"):
+        print(f"Thinking: {line}", flush=True)
+    if hasattr(msg, "tool_calls") and msg.tool_calls:
+      for i, tc in enumerate(msg.tool_calls):
+        tool_calls_accumulator[i] = {
+          "id": tc.id,
+          "name": tc.function.name,
+          "arguments": tc.function.arguments
+        }
+
+  return round_content, round_thinking, tool_calls_accumulator
+
+
+def _request_zai_final_answer(client,
+                              params: dict,
+                              all_messages: list[dict],
+                              structure: dict | None,
+                              reason: str) -> tuple[str, str]:
+  """Ask Z-AI for one final answer-only turn with thinking and tools disabled."""
+  final_messages = list(all_messages)
+  final_messages.append({
+    "role": "user",
+    "content": _build_zai_final_answer_prompt(structure, reason)
+  })
+  final_params = dict(params)
+  final_params.pop("tools", None)
+  final_params.pop("tool_choice", None)
+  final_params["thinking"] = {"type": "disabled"}
+  output_text, final_thinking, _ = _run_zai_completion(client, final_params, final_messages)
+  return output_text, final_thinking
 
 
 # ---------------------------------------------------------------------------
@@ -289,73 +392,8 @@ def _zai_ai_hook(prompt: str,
     all_messages = list(params["messages"])  # mutable copy for tool rounds
 
     for tool_round in range(_MAX_TOOL_ROUNDS + 1):
-      current_params = dict(params)
-      current_params["messages"] = all_messages
-
-      response = client.chat.completions.create(**current_params)
-
-      round_thinking = ""
-      round_content = ""
-      tool_calls_accumulator: dict[int, dict] = {}  # index -> {id, name, arguments_str}
-
-      if params.get("stream"):
-        thinking_line_buf = ""
-
-        for chunk in response:
-          if not chunk.choices:
-            continue
-          delta = chunk.choices[0].delta
-
-          # Thinking / reasoning content
-          if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-            round_thinking += delta.reasoning_content
-            thinking_line_buf += delta.reasoning_content
-            while "\n" in thinking_line_buf:
-              line, thinking_line_buf = thinking_line_buf.split("\n", 1)
-              print(f"Thinking: {line}", flush=True)
-
-          # Regular content
-          if hasattr(delta, "content") and delta.content:
-            round_content += delta.content
-
-          # Tool calls (streamed incrementally)
-          if hasattr(delta, "tool_calls") and delta.tool_calls:
-            for tc in delta.tool_calls:
-              idx = tc.index
-              if idx not in tool_calls_accumulator:
-                tool_calls_accumulator[idx] = {
-                  "id": getattr(tc, "id", None) or "",
-                  "name": "",
-                  "arguments": ""
-                }
-              if tc.function:
-                if tc.function.name:
-                  tool_calls_accumulator[idx]["name"] = tc.function.name
-                if tc.function.arguments:
-                  tool_calls_accumulator[idx]["arguments"] += tc.function.arguments
-              # Capture id if it arrives in a later chunk
-              if getattr(tc, "id", None):
-                tool_calls_accumulator[idx]["id"] = tc.id
-
-        # Flush remaining thinking
-        if thinking_line_buf:
-          print(f"Thinking: {thinking_line_buf}", flush=True)
-          round_thinking += ""  # already accumulated above
-      else:
-        # Non-streaming fallback
-        msg = response.choices[0].message
-        round_content = msg.content or ""
-        if hasattr(msg, "reasoning_content") and msg.reasoning_content:
-          round_thinking = msg.reasoning_content
-          for line in round_thinking.split("\n"):
-            print(f"Thinking: {line}", flush=True)
-        if hasattr(msg, "tool_calls") and msg.tool_calls:
-          for i, tc in enumerate(msg.tool_calls):
-            tool_calls_accumulator[i] = {
-              "id": tc.id,
-              "name": tc.function.name,
-              "arguments": tc.function.arguments
-            }
+      round_content, round_thinking, tool_calls_accumulator = _run_zai_completion(
+        client, params, all_messages)
 
       chain_of_thought += round_thinking
 
@@ -404,9 +442,28 @@ def _zai_ai_hook(prompt: str,
 
       # Continue to next round (model will see tool results)
     else:
-      # Exhausted tool rounds - use whatever content we have
+      # Exhausted tool rounds - ask once more for an answer without tools.
       print(f"Warning: Z-AI tool call loop exceeded {_MAX_TOOL_ROUNDS} rounds")
-      output_text = round_content
+      output_text, final_thinking = _request_zai_final_answer(
+        client,
+        params,
+        all_messages,
+        structure,
+        reason="tool round limit reached",
+      )
+      chain_of_thought += final_thinking
+
+    if not output_text.strip():
+      print("Warning: Z-AI produced no visible answer text; requesting final answer turn.",
+            flush=True)
+      output_text, final_thinking = _request_zai_final_answer(
+        client,
+        params,
+        all_messages,
+        structure,
+        reason="previous response ended without visible answer text",
+      )
+      chain_of_thought += final_thinking
 
     chain_of_thought = chain_of_thought.strip()
 

@@ -29,12 +29,12 @@ class GrokEngine:
   xAI Grok AI Engine class.
   
   Configuration parameters:
-  - model: Model name (e.g., "grok-3")
-  - reasoning: Reasoning mode:
-      - False or 0: No special reasoning (standard mode)
-      - "o1-preview": Use o1-preview model with extended reasoning
-      - "o1-mini": Use o1-mini model (faster reasoning)
-      - Integer (1-10): Reasoning effort level (for o1 models)
+  - model: Model name (e.g., "grok-4.3")
+  - reasoning: Reasoning effort on the benchmark's 0-9 scale:
+      - False or 0: Maps to xAI reasoning_effort="none"
+      - 1-3: Maps to xAI reasoning_effort="low"
+      - 4-6: Maps to xAI reasoning_effort="medium"
+      - 7-9: Maps to xAI reasoning_effort="high"
   - tools: Tool capabilities:
       - False: No tools available
       - True: Enable ALL built-in tools (web_search, code_interpreter)
@@ -65,6 +65,27 @@ class GrokEngine:
                          self.reasoning,
                          self.tools,
                          timeout_override=self.timeout)
+
+
+def _map_xai_reasoning_effort(reasoning) -> str | None:
+  """Map benchmark reasoning values onto xAI's supported effort strings."""
+  if reasoning is False or reasoning == 0:
+    return "none"
+
+  if isinstance(reasoning, int) and reasoning > 0:
+    if reasoning <= 3:
+      return "low"
+    if reasoning <= 6:
+      return "medium"
+    return "high"
+
+  if isinstance(reasoning, str) and reasoning in {"none", "low", "medium", "high"}:
+    return reasoning
+
+  if reasoning is True:
+    return "low"
+
+  return None
 
 
 def json_schema_to_pydantic(schema: dict, name: str = "DynamicModel") -> type[BaseModel]:
@@ -173,12 +194,16 @@ Return ONLY the JSON object, no markdown formatting, no code blocks, no explanat
   return user_args
 
 
-def build_xai_chat_params(model: str, tools) -> dict:
+def build_xai_chat_params(model: str, reasoning, tools) -> dict:
   """
   Build the chat creation parameters for xAI.
   Used by both the sync hook and batch submission.
   """
   chat_params = {"model": model}
+
+  reasoning_effort = _map_xai_reasoning_effort(reasoning)
+  if reasoning_effort is not None:
+    chat_params["reasoning_effort"] = reasoning_effort
 
   # Add tools if specified
   if tools is True:
@@ -195,6 +220,91 @@ def build_xai_chat_params(model: str, tools) -> dict:
       chat_params["tools"] = tools
 
   return chat_params
+
+
+def _build_xai_rest_tools(tools):
+  """Build xAI REST-native tool payloads for chat completion bodies."""
+  if not tools or tools is False:
+    return None
+
+  if tools is True:
+    return [
+      {"type": "web_search"},
+      {"type": "x_search"},
+      {"type": "code_interpreter"},
+    ]
+
+  if isinstance(tools, list):
+    return tools
+
+  return None
+
+
+def _build_xai_batch_request_body(model: str, reasoning, tools, prompt: str,
+                                  structure: dict | None) -> dict:
+  """Build an xAI batch request using chat or responses shape as appropriate."""
+  rest_tools = _build_xai_rest_tools(tools)
+
+  if rest_tools:
+    response_body: dict = {
+      "model": model,
+      "input": [{
+        "role": "user",
+        "content": _build_rest_user_content(prompt, None)
+      }],
+      "tools": rest_tools,
+    }
+    reasoning_effort = _map_xai_reasoning_effort(reasoning)
+    if reasoning_effort is not None:
+      response_body["reasoning"] = {"effort": reasoning_effort}
+
+    if structure is not None:
+      response_body["text"] = {
+        "format": {
+          "type": "json_schema",
+          "name": "structured_response",
+          "schema": structure,
+          "strict": True
+        }
+      }
+
+    return {"responses": response_body}
+
+  messages = [{"role": "user", "content": _build_rest_user_content(prompt, structure)}]
+  completion_body: dict = {"messages": messages, "model": model}
+
+  reasoning_effort = _map_xai_reasoning_effort(reasoning)
+  if reasoning_effort is not None:
+    completion_body["reasoning_effort"] = reasoning_effort
+
+  return {"chat_get_completion": completion_body}
+
+
+def _extract_xai_batch_text_and_reasoning(batch_result: dict) -> tuple[str, str]:
+  """Extract final text and reasoning summary from xAI batch result payloads."""
+  response_payload = batch_result.get("response", {})
+
+  chat_completion = response_payload.get("chat_get_completion")
+  if chat_completion:
+    choices = chat_completion.get("choices", [])
+    message = choices[0].get("message", {}) if choices else {}
+    return message.get("content", "") or "", message.get("reasoning_content", "") or ""
+
+  responses_payload = response_payload.get("responses")
+  if responses_payload:
+    text_content = responses_payload.get("output_text", "") or ""
+    cot = ""
+    for item in responses_payload.get("output", []) or []:
+      if item.get("type") != "message":
+        continue
+      for content_item in item.get("content", []) or []:
+        if content_item.get("type") == "output_text" and not text_content:
+          text_content = content_item.get("text", "") or ""
+        elif content_item.get("type") in ("summary_text", "reasoning_summary_text"):
+          cot += content_item.get("text", "") or ""
+    return text_content, cot
+
+  return "", ""
 
 
 def _grok_ai_hook(prompt: str,
@@ -221,7 +331,7 @@ def _grok_ai_hook(prompt: str,
     client = Client(timeout=timeout_override or 3600)
 
     # Build chat creation parameters using shared helper
-    chat_params = build_xai_chat_params(model, tools)
+    chat_params = build_xai_chat_params(model, reasoning, tools)
 
     # Convert JSON schema to Pydantic model if provided
     pydantic_model = None
@@ -421,6 +531,7 @@ def submit_batch(config: dict, requests: list) -> str | None:
 
   headers = _xai_rest_headers()
   model = config.get("base_model", "grok-3")
+  reasoning = config.get("reasoning", False)
   tools_cfg = config.get("tools", False)
 
   # Step 1: Create batch
@@ -443,40 +554,19 @@ def submit_batch(config: dict, requests: list) -> str | None:
 
     batch_reqs = []
     for req in chunk:
-      user_content = _build_rest_user_content(req.prompt, req.structure)
-      messages = [{"role": "user", "content": user_content}]
-
-      completion_body: dict = {"messages": messages, "model": model}
-
-      # Add tools if configured
-      if tools_cfg is True:
-        completion_body["tools"] = [
-          {
-            "type": "function",
-            "function": {
-              "name": "web_search"
-            }
-          },
-          {
-            "type": "function",
-            "function": {
-              "name": "code_execution"
-            }
-          },
-        ]
-
       batch_reqs.append({
         "batch_request_id": req.custom_id,
-        "batch_request": {
-          "chat_get_completion": completion_body
-        }
+        "batch_request": _build_xai_batch_request_body(model, reasoning, tools_cfg, req.prompt,
+                                                       req.structure)
       })
 
     print(f"[Batch-xAI] Adding chunk {chunk_num}/{total_chunks} ({len(chunk)} requests)...")
     resp = http.post(f"{_XAI_BASE}/batches/{batch_id}/requests",
                      headers=headers,
                      json={"batch_requests": batch_reqs})
-    resp.raise_for_status()
+    if not resp.ok:
+      raise RuntimeError(
+        f"Failed to add xAI batch requests ({resp.status_code}): {resp.text}")
     print(f"[Batch-xAI] Chunk {chunk_num} added OK")
 
   return batch_id
@@ -543,13 +633,7 @@ def poll_batch(batch_id: str, requests: list) -> tuple:
           })
           continue
 
-        # Extract content from nested response structure
-        chat_completion = batch_result.get("response", {}).get("chat_get_completion", {})
-        choices = chat_completion.get("choices", [])
-        message = choices[0].get("message", {}) if choices else {}
-
-        text_content = message.get("content", "") or ""
-        cot = message.get("reasoning_content", "") or ""
+        text_content, cot = _extract_xai_batch_text_and_reasoning(batch_result)
 
         # Parse JSON if structured
         result_data = text_content

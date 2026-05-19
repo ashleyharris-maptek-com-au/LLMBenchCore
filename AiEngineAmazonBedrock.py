@@ -204,6 +204,85 @@ def build_bedrock_content(prompt: str) -> list[dict]:
   return content_blocks
 
 
+def _build_bedrock_final_answer_prompt(structure: Optional[dict],
+                                       reason: str = "previous response ended without visible answer text"
+                                      ) -> str:
+  prefix = f"{reason.capitalize()}. "
+  if structure is not None:
+    return (prefix + "Do not do extra thinking. Using what you already know, return your final "
+            "answer now as valid JSON only. No markdown, no explanation.")
+  return (prefix + "Do not do extra thinking. Using what you already know, return your final "
+          "answer now.")
+
+
+def _request_bedrock_final_answer(client,
+                                  model: str,
+                                  messages: list[dict],
+                                  inference_config: dict,
+                                  flex_tier: bool,
+                                  additional_fields: dict,
+                                  structure: Optional[dict],
+                                  use_tool_for_structure: bool) -> tuple[str, str, str]:
+  final_messages = list(messages)
+  final_messages.append({
+    "role": "user",
+    "content": [{
+      "text": _build_bedrock_final_answer_prompt(structure)
+    }]
+  })
+
+  final_params = {
+    "modelId": model,
+    "messages": final_messages,
+    "inferenceConfig": dict(inference_config),
+  }
+  if flex_tier:
+    final_params["performanceConfig"] = {"serviceTier": "flex"}
+
+  final_fields = dict(additional_fields)
+  if "enable_thinking" in final_fields:
+    final_fields["enable_thinking"] = False
+  if final_fields:
+    final_params["additionalModelRequestFields"] = final_fields
+
+  if structure is not None and use_tool_for_structure:
+    structured_tool = {
+      "toolSpec": {
+        "name": "structured_response",
+        "description":
+        "Submit your response in the required structured format. You MUST call this tool with your complete answer.",
+        "inputSchema": {
+          "json": structure
+        }
+      }
+    }
+    final_params["toolConfig"] = {
+      "tools": [structured_tool],
+      "toolChoice": {
+        "tool": {
+          "name": "structured_response"
+        }
+      }
+    }
+
+  response = client.converse(**final_params)
+
+  output_text = ""
+  tool_use_input = ""
+  chain_of_thought = ""
+  output_message = response.get('output', {}).get('message', {})
+  for content_block in output_message.get('content', []):
+    if 'text' in content_block:
+      output_text += content_block['text']
+    if 'toolUse' in content_block:
+      tool_input = content_block['toolUse'].get('input', {})
+      tool_use_input = json.dumps(tool_input) if isinstance(tool_input, dict) else str(tool_input)
+    if 'reasoningContent' in content_block:
+      chain_of_thought += content_block['reasoningContent'].get('text', '')
+
+  return output_text, chain_of_thought, tool_use_input
+
+
 def _bedrock_ai_hook(prompt: str,
                      structure: Optional[dict],
                      model: str,
@@ -442,6 +521,23 @@ def _bedrock_ai_hook(prompt: str,
 
     chainOfThought = chainOfThought.rstrip("\n")
 
+    if not output_text.strip() and not tool_use_input.strip():
+      print("Warning: Bedrock produced no visible answer text; requesting final answer turn.",
+            flush=True)
+      output_text, final_thinking, tool_use_input = _request_bedrock_final_answer(
+        client,
+        model,
+        messages,
+        inference_config,
+        flex_tier,
+        additional_fields,
+        structure,
+        use_tool_for_structure,
+      )
+      if final_thinking:
+        chainOfThought += ("\n" if chainOfThought else "") + final_thinking
+      chainOfThought = chainOfThought.rstrip("\n")
+
     # Parse response
     print(f"Total output length: {len(output_text)} chars, tool_use: {len(tool_use_input)} chars")
     if structure is not None:
@@ -488,7 +584,7 @@ def _bedrock_ai_hook(prompt: str,
             print(f"Warning: Failed to validate JSON response against schema: {e}")
             print(f"Raw output was: {output_text[:500]}")
             return {}, f"Warning: Failed to validate JSON response against schema: {e}" + chainOfThought
-      return {}, f"Warning: Failed to validate JSON response against schema: {e}" + chainOfThought
+      return {}, "Warning: Bedrock returned no structured output." + chainOfThought
     else:
       return output_text or "", chainOfThought
 

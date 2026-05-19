@@ -419,6 +419,19 @@ def _remove_parallel_args(cli_args: List[str]) -> List[str]:
     if arg.startswith("--parallel="):
       i += 1
       continue
+    if arg.startswith("--model="):
+      i += 1
+      continue
+    if arg.startswith("-m="):
+      i += 1
+      continue
+    if arg == "--model":
+      i += 2
+      continue
+    if arg == "-m":
+      i += 2
+      continue
+
     result.append(arg)
     i += 1
   return result
@@ -479,6 +492,7 @@ def get_default_model_configs() -> List[Any]:
   gemini_mux = AiEngineMultiplexerFactory(gemini_factories)
 
   gemini_base_models = [
+    "gemma-4-26b-a4b-it",
     "gemma-4-31b-it",
     "gemini-2.5-flash-lite",
     "gemini-3.1-flash-lite-preview",
@@ -539,7 +553,6 @@ def get_default_model_configs() -> List[Any]:
           "reasoning": reasoning,
           "tools": tools,
         })
-  """
   grok_factories = []
   try:
     from .AiEngineGrokCli import GrokCliEngine
@@ -551,22 +564,18 @@ def get_default_model_configs() -> List[Any]:
   grok_factories.append(GrokEngine)
   grok_mux = AiEngineMultiplexerFactory(grok_factories)
 
-  grok_configs = [
-    ("grok-4-1-fast-non-reasoning", "grok-4-1-fast-non-reasoning", False, False),
-    ("grok-4-1-fast-reasoning", "grok-4-1-fast-reasoning", 10, False),
-    ("grok-code-fast-1", "grok-code-fast-1", False, False),
-    ("grok-4-0709", "grok-4-0709", False, False),
-    ("grok-4-0709-HighReasoning", "grok-4-0709", 10, False),
-    ("grok-4-0709-Reasoning-Tools", "grok-4-0709", 10, True),
-  ]
-  for name, base_model, reasoning, tools in grok_configs:
-    configs.append({
-      "name": name,
-      "engine": grok_mux.create(base_model, reasoning, tools),
-      "base_model": base_model,
-      "reasoning": reasoning,
-      "tools": tools,
-    })
+  grok_models = ["grok-4.3"]
+  for name in grok_models:
+    for reasoning in [0, 2, 4, 9]:
+      for tools in [True, False]:
+        configs.append({
+          "name": _config_name(name, reasoning, tools),
+          "engine": grok_mux.create(name, reasoning, tools),
+          "base_model": name,
+          "reasoning": reasoning,
+          "tools": tools,
+        })
+  """
 
   # ── Amazon Bedrock  (Qwen, Llama, Mistral, Nova) ───────────────────────
   # These are Bedrock-only models; no multiplexer needed.
@@ -595,18 +604,24 @@ def get_default_model_configs() -> List[Any]:
         "env_key": "AWS_ACCESS_KEY_ID",
       })
 
+  """
+
   # ── Z-AI (Zhipu) models ────────────────────────────────────────────────
-  zai_base_models = ["glm-5", "glm-4.6v", "glm-4.7-flashx", "glm-4.6v-flash"]
+  zai_base_models = [
+    "glm-4.6v", "glm-4.7-flashx", "glm-4.6v-flash", "glm-5-turbo", "glm-5", "glm-5.1"
+  ]
   for model_id in zai_base_models:
-    for reasoning, tools in [(False, False), (10, False), (10, True)]:
-      configs.append({
-        "name": _config_name(model_id, reasoning, tools),
-        "engine": "zai",
-        "base_model": model_id,
-        "reasoning": reasoning,
-        "tools": tools,
-        "env_key": "ZAI_API_KEY",
-      })
+    # Z-AI thinking is binary (0 = off, 9 = on)
+    for reasoning in [0, 9]:
+      for tools in [True, False]:
+        configs.append({
+          "name": _config_name(model_id, reasoning, tools),
+          "engine": "zai",
+          "base_model": model_id,
+          "reasoning": reasoning,
+          "tools": tools,
+          "env_key": "ZAI_API_KEY",
+        })
 
   # ── llama.cpp local server (optional) ───────────────────────────────────
   if os.environ.get("LLAMACPP_BASE_URL"):
@@ -618,7 +633,6 @@ def get_default_model_configs() -> List[Any]:
       "base_url": os.environ.get("LLAMACPP_BASE_URL"),
       "env_key": "LLAMACPP_BASE_URL",
     })
-  """
 
   return configs
 
@@ -792,44 +806,6 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
   ALL_MODEL_CONFIGS.clear()
   ALL_MODEL_CONFIGS.extend(all_configs)
 
-  # Handle --parallel mode
-  if args.parallel is not None:
-    if args.models:
-      parser.error("--parallel and --models aren't compatible")
-
-    parallel_workers = args.parallel
-    cli_args = _remove_parallel_args(sys.argv[1:])
-    print(f"Parallel mode: running up to {parallel_workers} model(s) at a time")
-
-    def run_parallel_model(config: Dict[str, Any]) -> int:
-      model_name = config["name"]
-      print(f"[parallel] starting {model_name}")
-      completed = subprocess.run([sys.executable, script_file, "-m", model_name, *cli_args])
-      if completed.returncode == 0:
-        print(f"[parallel] finished {model_name}")
-      else:
-        print(f"[parallel] failed {model_name} with exit code {completed.returncode}")
-      return completed.returncode
-
-    random.shuffle(all_configs)
-
-    exit_code = 0
-    with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
-      future_to_config = {
-        executor.submit(run_parallel_model, config): config
-        for config in all_configs
-      }
-      for future in as_completed(future_to_config):
-        config = future_to_config[future]
-        try:
-          result_code = future.result()
-        except Exception as e:
-          print(f"[parallel] failed {config['name']} with exception: {e}")
-          result_code = 1
-        if result_code != 0 and exit_code == 0:
-          exit_code = result_code
-    sys.exit(exit_code)
-
   # Handle --list-models
   if args.list_models:
     print("Available models:")
@@ -868,11 +844,6 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
   if args.models:
     import fnmatch
 
-    if args.models == "best":
-      args.models = "gpt-5.2-Reasoning-Tools,gemini-3-pro-preview-Reasoning-Tools,grok-4-0709-HighReasoning,claude-opus-4-5-Reasoning-Tools,qwen3-VL-235B-22B,llama3-1-405b-bedrock,mistral-large-bedrock,nova-premier-Reasoning-Tools"
-    elif args.models == "worst":
-      args.models = "nova-lite,llama3-70b-bedrock,qwen3-32B,claude-sonnet-4-5,grok-2-vision-1212,gemini-2.5-flash-lite,gpt-5-nano"
-
     all_model_names = [c["name"] for c in all_configs]
     patterns = [m.strip() for m in args.models.split(",")]
     matched_models = set()
@@ -904,6 +875,42 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
 
     model_filter = matched_models
     print(f"Running models: {sorted(model_filter)}")
+
+  # Handle --parallel mode
+  if args.parallel is not None:
+
+    parallel_workers = args.parallel
+    cli_args = _remove_parallel_args(sys.argv[1:])
+    print(f"Parallel mode: running up to {parallel_workers} model(s) at a time")
+
+    def run_parallel_model(config: Dict[str, Any]) -> int:
+      model_name = config["name"]
+      print(f"[parallel] starting {model_name}")
+      completed = subprocess.run([sys.executable, script_file, "-m", model_name, *cli_args])
+      if completed.returncode == 0:
+        print(f"[parallel] finished {model_name}")
+      else:
+        print(f"[parallel] failed {model_name} with exit code {completed.returncode}")
+      return completed.returncode
+
+    random.shuffle(all_configs)
+
+    exit_code = 0
+    with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
+      future_to_config = {
+        executor.submit(run_parallel_model, config): config
+        for config in all_configs if (not model_filter or config["name"] in model_filter)
+      }
+      for future in as_completed(future_to_config):
+        config = future_to_config[future]
+        try:
+          result_code = future.result()
+        except Exception as e:
+          print(f"[parallel] failed {config['name']} with exception: {e}")
+          result_code = 1
+        if result_code != 0 and exit_code == 0:
+          exit_code = result_code
+    sys.exit(exit_code)
 
   # Handle --import-batch mode
   if args.import_batch:
@@ -1108,9 +1115,10 @@ def runTest(index: int,
   t = time.time()
 
   try:
-    code = open("" + str(index) + ".py", encoding="utf-8").read()
-    compiled = compile(code, "" + str(index) + ".py", "exec")
-    exec(compiled, g)
+    with open("" + str(index) + ".py", encoding="utf-8") as f:
+      code = f.read()
+      compiled = compile(code, "" + str(index) + ".py", "exec")
+      exec(compiled, g)
   except ImportError:
     print("Missing dependancy. Run 'pip install -r requirements.txt' before running!")
 
@@ -1178,19 +1186,20 @@ def runTest(index: int,
       subpass_meta.pop(idx, None)
 
     try:
-      open(rp.model_raw_path(aiEngineName, index, idx), "w", encoding="utf-8").write(str(result))
+      with open(rp.model_raw_path(aiEngineName, index, idx), "w", encoding="utf-8") as f:
+        f.write(str(result))
     except Exception as e:
       print("Failed to save result for subpass " + str(idx) + " - " + str(e))
 
     try:
-      open(rp.model_prompt_path(aiEngineName, index, idx), "w",
-           encoding="utf-8").write(str(effective_prompt))
+      with open(rp.model_prompt_path(aiEngineName, index, idx), "w", encoding="utf-8") as f:
+        f.write(str(effective_prompt))
     except Exception as e:
       print("Failed to save prompt for subpass " + str(idx) + " - " + str(e))
 
     try:
-      open(rp.model_cot_path(aiEngineName, index, idx), "w",
-           encoding="utf-8").write(str(chainOfThought))
+      with open(rp.model_cot_path(aiEngineName, index, idx), "w", encoding="utf-8") as f:
+        f.write(str(chainOfThought))
     except Exception as e:
       print("Failed to save chain of thought for subpass " + str(idx) + " - " + str(e))
 
@@ -1714,10 +1723,9 @@ window.VizManager = (function() {
       test_result = {}
       # Load test metadata
       test_globals = {"__file__": str(testIndex) + ".py"}
-      compiled = compile(
-        open(str(testIndex) + ".py", encoding="utf-8").read(),
-        str(testIndex) + ".py", "exec")
-      exec(compiled, test_globals)
+      with open(str(testIndex) + ".py", encoding="utf-8") as f:
+        compiled = compile(f.read(), str(testIndex) + ".py", "exec")
+        exec(compiled, test_globals)
 
       test_was_run = test_filter is None or testIndex in test_filter
       if test_was_run:
