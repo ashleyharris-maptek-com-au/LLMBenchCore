@@ -289,7 +289,7 @@ def _gemini_cli_ai_hook(prompt: str,
         time.sleep(timeToWaitSeconds)
         return None
 
-      raise RuntimeError((stderr or stdout or "gemini CLI failed").strip())
+      return "", (stderr or stdout or "gemini CLI failed").strip()
 
     cli_output_text = read_text_file_if_exists(str(workspace_paths["cli_output"]))
     answer_json_text = read_text_file_if_exists(str(workspace_paths["answer_json"]))

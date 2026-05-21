@@ -886,7 +886,8 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
     def run_parallel_model(config: Dict[str, Any]) -> int:
       model_name = config["name"]
       print(f"[parallel] starting {model_name}")
-      completed = subprocess.run([sys.executable, script_file, "-m", model_name, *cli_args])
+      completed = subprocess.run([sys.executable, script_file, "-m", model_name, *cli_args],
+                                 timeout=86400 * 2)
       if completed.returncode == 0:
         print(f"[parallel] finished {model_name}")
       else:
@@ -1484,8 +1485,8 @@ def runTest(index: int,
       extraGradeAnswerRuns.remove(0)
     gotAZero = False
     for subPass in extraGradeAnswerRuns:
+      subpass_data = {}
       if gotAZero:
-        subpass_data = {}
         subpass_data["score"] = 0
         subpass_data["subpass"] = subPass
         subpass_data["scoreExplanation"] = "Skipped due to earlier zero score."
@@ -1494,10 +1495,10 @@ def runTest(index: int,
         continue
 
       print(f"Running extra subpass {subPass} for grading with engine {aiEngineName}")
-      subpass_data = {}
-      start = time.time()
+      subpass_data["startProcessingTime"] = time.time()
       gaResult = g["gradeAnswer"](results[0], subPass, aiEngineName)
-      execution_time = time.time() - start
+      subpass_data["endProcessingTime"] = time.time()
+      execution_time = subpass_data["endProcessingTime"] - subpass_data["startProcessingTime"]
       if execution_time > 1: print(f"Grade Answer {subPass} took {execution_time:.2f}s")
       niceResult = None
       if len(gaResult) == 2:
@@ -1521,6 +1522,11 @@ def runTest(index: int,
         if report_time > 1: print(f"Result to nice report {subPass} took {report_time:.2f}s")
       subpass_results.append(subpass_data)
       print()
+
+    if totalScore == len(subpass_results):
+      for subPass in extraGradeAnswerRuns:
+        propogateUpwardsHack(aiEngineName, index, subPass, score)
+
   # Filter out None entries (subtasks that weren't run due to subtask_filter)
   actual_subpass_results = [r for r in subpass_results if r is not None]
   return {

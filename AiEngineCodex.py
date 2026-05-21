@@ -293,7 +293,7 @@ def _codex_ai_hook(prompt: str,
 
     if completed.returncode != 0:
       print("Codex CLI command failed: ", command)
-      raise RuntimeError((stderr or stdout or "codex exec failed").strip())
+      return "", (stderr or stdout or "codex exec failed").strip()
 
     codex_output_text = _read_text_file_if_exists(workspace_paths["codex_output"])
     answer_json_text = _read_text_file_if_exists(workspace_paths["answer_json"])
