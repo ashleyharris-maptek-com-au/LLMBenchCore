@@ -17,6 +17,11 @@ import datetime
 import json
 import re
 
+try:
+  import minify_html
+except ImportError:
+  minify_html = None
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from filelock import FileLock
 from .CacheLayer import CacheLayer as cl
@@ -58,6 +63,38 @@ _REPORT_IMAGE_EXT_BY_MIME = {
   "image/webp": ".webp",
   "image/svg+xml": ".svg",
 }
+MINIFY_REPORT_BYTES = 50 * 1024 * 1024
+
+
+def _minify_report_if_oversized(report_path: str) -> None:
+  if minify_html is None:
+    return
+  try:
+    if not os.path.exists(report_path):
+      return
+    original_size = os.path.getsize(report_path)
+    if original_size <= MINIFY_REPORT_BYTES:
+      return
+    with open(report_path, "r", encoding="utf-8", errors="ignore") as f:
+      report_html = f.read()
+    minified_html = minify_html.minify(report_html,
+                                   keep_closing_tags=True,
+                                   keep_html_and_head_opening_tags=True,
+                                   keep_comments=False,
+                                   minify_css=False,
+                                   minify_js=False,
+                                   remove_bangs=False,
+                                   remove_processing_instructions=False)
+    minified_size = len(minified_html.encode("utf-8"))
+    if minified_size >= original_size:
+      return
+    temp_path = report_path + ".tmp"
+    with open(temp_path, "w", encoding="utf-8", newline="") as f:
+      f.write(minified_html)
+    os.replace(temp_path, report_path)
+    print(f"Minified HTML report from {original_size / (1024 * 1024):.2f} MB to {minified_size / (1024 * 1024):.2f} MB: {report_path}")
+  except Exception as exc:
+    print(f"HTML minify skipped for {report_path}: {exc}")
 
 
 def is_placebo_model(model_name: str) -> bool:
@@ -2078,6 +2115,7 @@ window.VizManager = (function() {
 
   results_file.write("</body>\n</html>\n")
   results_file.close()
+  _minify_report_if_oversized(resultFilePath)
 
   print("\n" + "=" * 60)
   print("BENCHMARK COMPLETE")
