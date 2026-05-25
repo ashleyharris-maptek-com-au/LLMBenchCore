@@ -124,7 +124,7 @@ class CacheLayer:
       if cached_result is not None:
         return cached_result
 
-    print("API Call: " + prompt[:100].replace("\n", " ") + "...")
+    print(f"API Call ({self.engineName}): " + prompt[:100].replace("\n", " ") + "...")
 
     if OFFLINE_MODE:
       print("Offline mode: No API calls will be made, cache only.")

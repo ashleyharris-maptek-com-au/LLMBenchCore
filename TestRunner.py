@@ -17,6 +17,11 @@ import datetime
 import json
 import re
 
+try:
+  import minify_html
+except ImportError:
+  minify_html = None
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from filelock import FileLock
 from .CacheLayer import CacheLayer as cl
@@ -58,6 +63,38 @@ _REPORT_IMAGE_EXT_BY_MIME = {
   "image/webp": ".webp",
   "image/svg+xml": ".svg",
 }
+MINIFY_REPORT_BYTES = 50 * 1024 * 1024
+
+
+def _minify_report_if_oversized(report_path: str) -> None:
+  if minify_html is None:
+    return
+  try:
+    if not os.path.exists(report_path):
+      return
+    original_size = os.path.getsize(report_path)
+    if original_size <= MINIFY_REPORT_BYTES:
+      return
+    with open(report_path, "r", encoding="utf-8", errors="ignore") as f:
+      report_html = f.read()
+    minified_html = minify_html.minify(report_html,
+                                   keep_closing_tags=True,
+                                   keep_html_and_head_opening_tags=True,
+                                   keep_comments=False,
+                                   minify_css=False,
+                                   minify_js=False,
+                                   remove_bangs=False,
+                                   remove_processing_instructions=False)
+    minified_size = len(minified_html.encode("utf-8"))
+    if minified_size >= original_size:
+      return
+    temp_path = report_path + ".tmp"
+    with open(temp_path, "w", encoding="utf-8", newline="") as f:
+      f.write(minified_html)
+    os.replace(temp_path, report_path)
+    print(f"Minified HTML report from {original_size / (1024 * 1024):.2f} MB to {minified_size / (1024 * 1024):.2f} MB: {report_path}")
+  except Exception as exc:
+    print(f"HTML minify skipped for {report_path}: {exc}")
 
 
 def is_placebo_model(model_name: str) -> bool:
@@ -471,6 +508,7 @@ def get_default_model_configs() -> List[Any]:
   for model in openai_base_models:
     for reasoning in [0, 2, 4, 6, 9]:
       for tools in [True, False]:
+        if model == "gpt-5.2-pro" and reasoning == 2: continue
         configs.append({
           "name": _config_name(model, reasoning, tools),
           "engine": openai_mux.create(model, reasoning, tools),
@@ -885,7 +923,8 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
     def run_parallel_model(config: Dict[str, Any]) -> int:
       model_name = config["name"]
       print(f"[parallel] starting {model_name}")
-      completed = subprocess.run([sys.executable, script_file, "-m", model_name, *cli_args])
+      completed = subprocess.run([sys.executable, script_file, "-m", model_name, *cli_args],
+                                 timeout=86400 * 2)
       if completed.returncode == 0:
         print(f"[parallel] finished {model_name}")
       else:
@@ -1483,8 +1522,8 @@ def runTest(index: int,
       extraGradeAnswerRuns.remove(0)
     gotAZero = False
     for subPass in extraGradeAnswerRuns:
+      subpass_data = {}
       if gotAZero:
-        subpass_data = {}
         subpass_data["score"] = 0
         subpass_data["subpass"] = subPass
         subpass_data["scoreExplanation"] = "Skipped due to earlier zero score."
@@ -1493,10 +1532,10 @@ def runTest(index: int,
         continue
 
       print(f"Running extra subpass {subPass} for grading with engine {aiEngineName}")
-      subpass_data = {}
-      start = time.time()
+      subpass_data["startProcessingTime"] = time.time()
       gaResult = g["gradeAnswer"](results[0], subPass, aiEngineName)
-      execution_time = time.time() - start
+      subpass_data["endProcessingTime"] = time.time()
+      execution_time = subpass_data["endProcessingTime"] - subpass_data["startProcessingTime"]
       if execution_time > 1: print(f"Grade Answer {subPass} took {execution_time:.2f}s")
       niceResult = None
       if len(gaResult) == 2:
@@ -1520,6 +1559,11 @@ def runTest(index: int,
         if report_time > 1: print(f"Result to nice report {subPass} took {report_time:.2f}s")
       subpass_results.append(subpass_data)
       print()
+
+    if totalScore == len(subpass_results):
+      for subPass in extraGradeAnswerRuns:
+        propogateUpwardsHack(aiEngineName, index, subPass, score)
+
   # Filter out None entries (subtasks that weren't run due to subtask_filter)
   actual_subpass_results = [r for r in subpass_results if r is not None]
   return {
@@ -2071,6 +2115,7 @@ window.VizManager = (function() {
 
   results_file.write("</body>\n</html>\n")
   results_file.close()
+  _minify_report_if_oversized(resultFilePath)
 
   print("\n" + "=" * 60)
   print("BENCHMARK COMPLETE")

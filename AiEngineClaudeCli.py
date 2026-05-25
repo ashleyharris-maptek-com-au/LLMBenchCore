@@ -173,8 +173,9 @@ def _claude_cli_ai_hook(prompt: str,
     if completed.returncode == 1 and stderr == "":
       print("Calude CLI command failed: ", command)
       if '"api_error_status":429' in stdout or "You've hit your limit" in stdout:
-        print("Rate limited, waiting 1 hour...")
-        time.sleep(3600)
+        print("Rate limited, waiting 5 hours...")
+        time.sleep(3600 * 5)
+        print("End of rate limited wait!")
         return None
       if "API Error: 529 Overloaded" in stdout:
         print("Overloaded, waiting 10 minutes...")
@@ -185,7 +186,7 @@ def _claude_cli_ai_hook(prompt: str,
       f.write(stdout)
 
     if completed.returncode != 0:
-      raise RuntimeError((stderr or stdout or "claude CLI failed").strip())
+      return "", (stderr or stdout or "claude CLI failed").strip()
 
     cli_output_text = read_text_file_if_exists(str(workspace_paths["cli_output"]))
     answer_json_text = read_text_file_if_exists(str(workspace_paths["answer_json"]))

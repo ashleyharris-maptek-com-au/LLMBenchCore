@@ -12,3 +12,4 @@ json-repair
 duckduckgo_search
 numpy
 scipy
+minify-html>=0.18.1

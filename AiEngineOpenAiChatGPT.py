@@ -176,7 +176,7 @@ def build_openai_response_params(prompt: str,
     response_params["tools"] = [{"type": "web_search"}]
 
     # 5.2 pro doesn't support code execution.
-    if "5.2-pro" not in model_to_use and "5.1-codex" not in model_to_use:
+    if "5.2-pro" not in model_to_use and "codex" not in model_to_use:
       response_params["tools"].append({"type": "code_interpreter", "container": {"type": "auto"}})
 
   elif tools and tools is not False:

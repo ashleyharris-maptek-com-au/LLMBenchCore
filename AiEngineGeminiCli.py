@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import time
+import random
 from typing import Any
 
 from .AiEngineCliWorkspace import (create_workspace_dir, largest_new_file, read_text_file_if_exists,
@@ -264,6 +265,41 @@ def _gemini_cli_ai_hook(prompt: str,
         raise LookupError("Model is not supported when using Gemini via CLI")
 
       if "QUOTA_EXHAUSTED" in completed.stderr:
+
+        googleAccountFile = os.path.expanduser("~/.gemini/google_accounts.json")
+        oauthCredsFile = os.path.expanduser("~/.gemini/oauth_creds.json")
+
+        altFolder = os.path.expanduser("~/.gemini/alt")
+
+        gaLastModified = os.path.getmtime(googleAccountFile)
+
+        if os.path.exists(altFolder):
+          if gaLastModified < time.time() - 3600:
+            print("Google account file is older than 1 hour, switching to alt account...")
+
+            with open(googleAccountFile) as f:
+              gaJson = json.load(f)
+
+            activeAlt = gaJson["active"].replace("@gmail.com", "")
+            altAccounts = os.listdir(altFolder)
+            altAccounts.remove(activeAlt)
+            altAccount = random.choice(altAccounts)
+            print(f"Switching to alt account: {altAccount}")
+
+            gaJson["active"] = altAccount + "@gmail.com"
+            with open(googleAccountFile, "w") as f:
+              json.dump(gaJson, f)
+
+            # Copy new creds
+            shutil.copy(os.path.join(altFolder, altAccount, "oauth_creds.json"), oauthCredsFile)
+
+            print("Switched to alt account")
+            return None
+
+          print("Quota exhausted after switched to an alt, waiting 3 hours...")
+          time.sleep(3600 * 3)
+          return None
+
         # delay format is like 18h47m33s
 
         timeToWaitString = re.search(r'(\d+h)(\d+m)(\d+s)', completed.stderr)
@@ -282,7 +318,7 @@ def _gemini_cli_ai_hook(prompt: str,
         time.sleep(timeToWaitSeconds)
         return None
 
-      raise RuntimeError((stderr or stdout or "gemini CLI failed").strip())
+      return "", (stderr or stdout or "gemini CLI failed").strip()
 
     cli_output_text = read_text_file_if_exists(str(workspace_paths["cli_output"]))
     answer_json_text = read_text_file_if_exists(str(workspace_paths["answer_json"]))
