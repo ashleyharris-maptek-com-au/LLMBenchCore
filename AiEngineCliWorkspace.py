@@ -2,10 +2,10 @@ import json
 import os
 import shutil
 import uuid
+from pathlib import Path
 from urllib.request import Request, urlopen
 
 from . import PromptImageTagging as pit
-
 
 _IMAGE_EXTENSIONS_BY_MIME_TYPE = {
   "image/jpeg": ".jpg",
@@ -113,6 +113,8 @@ def write_prompt_workspace(prompt: str, structure: dict | None,
   else:
     question_parts.append(prompt)
 
+  question_text = "".join(question_parts).strip()
+
   paths = {
     "question": os.path.join(workspace_dir, "question.txt"),
     "answer_json": os.path.join(workspace_dir, "answer.json"),
@@ -120,10 +122,11 @@ def write_prompt_workspace(prompt: str, structure: dict | None,
     "cli_output": os.path.join(workspace_dir, "cli_output.txt"),
     "image_paths": [],
     "image_records": image_records,
+    "question_text": question_text,
   }
 
   with open(paths["question"], "w", encoding="utf-8") as f:
-    f.write("".join(question_parts))
+    f.write(question_text + "\n")
 
   if structure is not None:
     paths["structure"] = os.path.join(workspace_dir, "structure.json")
@@ -147,5 +150,37 @@ def write_prompt_workspace(prompt: str, structure: dict | None,
 def read_text_file_if_exists(path: str) -> str:
   if not os.path.exists(path):
     return ""
-  with open(path, "r", encoding="utf-8") as f:
+  with open(path, "r", encoding="utf-8", errors="ignore") as f:
     return f.read().strip()
+
+
+def snapshot_workspace_files(workspace_dir: str) -> set[str]:
+  return {str(path.resolve()) for path in Path(workspace_dir).rglob("*") if path.is_file()}
+
+
+def largest_new_file(workspace_dir: str,
+                     previous_files: set[str],
+                     exclude_paths: list[str] | None = None) -> str | None:
+  excluded = {str(Path(path).resolve()) for path in (exclude_paths or [])}
+  candidates: list[tuple[int, str]] = []
+
+  for path in Path(workspace_dir).rglob("*"):
+    if not path.is_file():
+      continue
+
+    resolved = str(path.resolve())
+    if resolved in previous_files or resolved in excluded:
+      continue
+
+    try:
+      size = path.stat().st_size
+    except OSError:
+      continue
+
+    candidates.append((size, resolved))
+
+  if not candidates:
+    return None
+
+  candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+  return candidates[0][1]

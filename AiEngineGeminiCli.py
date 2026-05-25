@@ -7,8 +7,9 @@ import subprocess
 import time
 from typing import Any
 
-from .AiEngineCliWorkspace import (create_workspace_dir, read_text_file_if_exists,
-                                   remove_workspace_dir, write_prompt_workspace)
+from .AiEngineCliWorkspace import (create_workspace_dir, largest_new_file, read_text_file_if_exists,
+                                   remove_workspace_dir, snapshot_workspace_files,
+                                   write_prompt_workspace)
 
 
 def _reasoning_label(reasoning) -> str:
@@ -121,35 +122,26 @@ def _ensure_gemini_reasoning_alias(model: str,
 
 
 def _build_prompt(workspace_paths: dict[str, object], structure: dict | None, tools) -> str:
-  instructions = [
-    "You are answering a benchmark prompt.",
-    "Work only in the current directory.",
-    "Read the benchmark question from @question.txt.",
-  ]
+
+  instructions = [str(workspace_paths.get("question_text", "")).strip()]
 
   image_records = workspace_paths.get("image_records", [])
   if image_records:
-    instructions.append("The prompt has these attached image files:")
+    instructions.append("See the following image files:")
     for record in image_records:
       if isinstance(record, dict) and record.get("local_ref"):
         instructions.append(f"@{record['local_ref']}")
-
   if structure is not None:
     instructions.append(
-      "Read the required JSON schema from @structure.json and write the final valid JSON answer to answer.json."
+      "See the JSON schema in structure.json. Once you're happy with the final answer, put it in answer.json"
     )
   else:
-    instructions.append("Write only the final answer to answer.txt.")
+    instructions.append("Keep the answer to a single file.")
 
   if tools:
     instructions.append(
-      "Tool access is allowed. Use tools when they materially improve the answer.")
-  else:
-    instructions.append(
-      "Do not run shell commands or use external tools unless absolutely necessary; editing the answer file is allowed."
-    )
+      "You have access to all the tools on this machine and can compile and execute code.")
 
-  instructions.append("After writing the answer file, respond with a short confirmation.")
   return "\n\n".join(instructions)
 
 
@@ -225,6 +217,7 @@ def _gemini_cli_ai_hook(prompt: str,
   workspace_dir = create_workspace_dir("llmbench_gemini")
   try:
     workspace_paths = write_prompt_workspace(prompt, structure, workspace_dir)
+    initial_files = snapshot_workspace_files(workspace_dir)
     cli_model, settings_path = _ensure_gemini_reasoning_alias(model, reasoning, workspace_dir)
     prompt_input = _build_prompt(workspace_paths, structure, tools)
     approval_mode = "yolo" if tools else "auto_edit"
@@ -295,6 +288,11 @@ def _gemini_cli_ai_hook(prompt: str,
     answer_json_text = read_text_file_if_exists(str(workspace_paths["answer_json"]))
     answer_txt_text = read_text_file_if_exists(str(workspace_paths["answer_txt"]))
     stdout_text = _extract_stdout_text(stdout)
+    largest_answer_path = largest_new_file(workspace_dir,
+                                           initial_files,
+                                           exclude_paths=[str(workspace_paths["cli_output"])])
+    largest_answer_text = read_text_file_if_exists(
+      largest_answer_path) if largest_answer_path else ""
 
     meta = {
       "backend": "gemini-cli",
@@ -303,21 +301,21 @@ def _gemini_cli_ai_hook(prompt: str,
       "settings_path": settings_path,
       "reasoning": reasoning,
       "tools": bool(tools),
-      "workspace_contract": "question/structure/answer-files",
-      "answer_file": "answer.json" if structure is not None else "answer.txt",
+      "workspace_contract": "question-in-prompt + largest-created-file",
+      "answer_file": "answer.json" if structure is not None else largest_answer_path,
       "stdout": stdout[-4000:],
       "stderr": stderr[-4000:],
       "cli_output": cli_output_text[-4000:],
     }
 
     if structure is not None:
-      output_text = answer_json_text or answer_txt_text or stdout_text
+      output_text = answer_json_text or answer_txt_text or largest_answer_text or stdout_text
       try:
         return json.loads(output_text), "", meta
       except json.JSONDecodeError as e:
         raise RuntimeError(f"gemini CLI returned invalid JSON: {e}: {output_text[:500]}") from e
 
-    output_text = answer_txt_text or answer_json_text or stdout_text
+    output_text = largest_answer_text or answer_txt_text or answer_json_text or stdout_text
     return output_text, "", meta
   finally:
     remove_workspace_dir(workspace_dir)

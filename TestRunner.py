@@ -565,7 +565,7 @@ def get_default_model_configs() -> List[Any]:
 
   grok_models = ["grok-4.3"]
   for name in grok_models:
-    for reasoning in [0, 2, 4, 9]:
+    for reasoning in [1, 9]:
       for tools in [True, False]:
         configs.append({
           "name": _config_name(name, reasoning, tools),

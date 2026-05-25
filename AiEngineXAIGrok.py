@@ -33,7 +33,6 @@ class GrokEngine:
   - reasoning: Reasoning effort on the benchmark's 0-9 scale:
       - False or 0: Maps to xAI reasoning_effort="none"
       - 1-3: Maps to xAI reasoning_effort="low"
-      - 4-6: Maps to xAI reasoning_effort="medium"
       - 7-9: Maps to xAI reasoning_effort="high"
   - tools: Tool capabilities:
       - False: No tools available
@@ -70,22 +69,22 @@ class GrokEngine:
 def _map_xai_reasoning_effort(reasoning) -> str | None:
   """Map benchmark reasoning values onto xAI's supported effort strings."""
   if reasoning is False or reasoning == 0:
-    return "none"
+    return "low"
 
   if isinstance(reasoning, int) and reasoning > 0:
     if reasoning <= 3:
       return "low"
-    if reasoning <= 6:
-      return "medium"
+    #if reasoning <= 6:
+    #  return "medium"
     return "high"
 
-  if isinstance(reasoning, str) and reasoning in {"none", "low", "medium", "high"}:
+  if isinstance(reasoning, str) and reasoning in {"low", "high"}:
     return reasoning
 
-  if reasoning is True:
+  if reasoning is high:
     return "low"
 
-  return None
+  return "low"
 
 
 def json_schema_to_pydantic(schema: dict, name: str = "DynamicModel") -> type[BaseModel]:
@@ -202,8 +201,7 @@ def build_xai_chat_params(model: str, reasoning, tools) -> dict:
   chat_params = {"model": model}
 
   reasoning_effort = _map_xai_reasoning_effort(reasoning)
-  if reasoning_effort is not None:
-    chat_params["reasoning_effort"] = reasoning_effort
+  chat_params["reasoning_effort"] = reasoning_effort
 
   # Add tools if specified
   if tools is True:
@@ -229,9 +227,15 @@ def _build_xai_rest_tools(tools):
 
   if tools is True:
     return [
-      {"type": "web_search"},
-      {"type": "x_search"},
-      {"type": "code_interpreter"},
+      {
+        "type": "web_search"
+      },
+      {
+        "type": "x_search"
+      },
+      {
+        "type": "code_interpreter"
+      },
     ]
 
   if isinstance(tools, list):
@@ -419,6 +423,7 @@ def _grok_ai_hook(prompt: str,
 
   except Exception as e:
     print(f"Error calling xAI Grok API: {e}")
+    print("Params were:\n" + str(chat_params))
 
     # Check for content policy violation
     from .ContentViolationHandler import is_content_violation_xai
@@ -555,9 +560,10 @@ def submit_batch(config: dict, requests: list) -> str | None:
     batch_reqs = []
     for req in chunk:
       batch_reqs.append({
-        "batch_request_id": req.custom_id,
-        "batch_request": _build_xai_batch_request_body(model, reasoning, tools_cfg, req.prompt,
-                                                       req.structure)
+        "batch_request_id":
+        req.custom_id,
+        "batch_request":
+        _build_xai_batch_request_body(model, reasoning, tools_cfg, req.prompt, req.structure)
       })
 
     print(f"[Batch-xAI] Adding chunk {chunk_num}/{total_chunks} ({len(chunk)} requests)...")
@@ -565,8 +571,7 @@ def submit_batch(config: dict, requests: list) -> str | None:
                      headers=headers,
                      json={"batch_requests": batch_reqs})
     if not resp.ok:
-      raise RuntimeError(
-        f"Failed to add xAI batch requests ({resp.status_code}): {resp.text}")
+      raise RuntimeError(f"Failed to add xAI batch requests ({resp.status_code}): {resp.text}")
     print(f"[Batch-xAI] Chunk {chunk_num} added OK")
 
   return batch_id

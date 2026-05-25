@@ -5,8 +5,9 @@ import shutil
 import subprocess
 import time
 
-from .AiEngineCliWorkspace import (create_workspace_dir, read_text_file_if_exists,
-                                   remove_workspace_dir, write_prompt_workspace)
+from .AiEngineCliWorkspace import (create_workspace_dir, largest_new_file,
+                                   read_text_file_if_exists, remove_workspace_dir,
+                                   snapshot_workspace_files, write_prompt_workspace)
 
 
 def _reasoning_label(reasoning) -> str:
@@ -27,7 +28,7 @@ def _build_prompt(workspace_paths: dict[str, object], structure: dict | None, to
   instructions = [
     "You are answering a benchmark prompt.",
     "Work only in the current directory.",
-    "Read the benchmark question from @question.txt.",
+    "A copy of the benchmark question is available in @question.txt.",
   ]
 
   image_records = workspace_paths.get("image_records", [])
@@ -42,12 +43,14 @@ def _build_prompt(workspace_paths: dict[str, object], structure: dict | None, to
       "Read the required JSON schema from @structure.json and write the final valid JSON answer to answer.json."
     )
   else:
-    instructions.append("Write the final answer to answer.txt.")
+    instructions.append("Keep your answer in a single file.")
 
   if tools:
     instructions.append(
       "Tool access is allowed. Use tools when they materially improve the answer.")
 
+  instructions.append("Benchmark question:")
+  instructions.append(str(workspace_paths.get("question_text", "")).strip())
   return "\n\n".join(instructions)
 
 
@@ -125,6 +128,7 @@ def _claude_cli_ai_hook(prompt: str,
   workspace_dir = create_workspace_dir("llmbench_claude")
   try:
     workspace_paths = write_prompt_workspace(prompt, structure, workspace_dir)
+    initial_files = snapshot_workspace_files(workspace_dir)
     prompt_input = _build_prompt(workspace_paths, structure, tools)
     permission_mode = "bypassPermissions" if tools else "acceptEdits"
     command = [
@@ -187,27 +191,33 @@ def _claude_cli_ai_hook(prompt: str,
     answer_json_text = read_text_file_if_exists(str(workspace_paths["answer_json"]))
     answer_txt_text = read_text_file_if_exists(str(workspace_paths["answer_txt"]))
     stdout_text = _extract_stdout_text(stdout)
+    largest_answer_path = largest_new_file(
+      workspace_dir,
+      initial_files,
+      exclude_paths=[str(workspace_paths["cli_output"])]
+    )
+    largest_answer_text = read_text_file_if_exists(largest_answer_path) if largest_answer_path else ""
 
     meta = {
       "backend": "claude-cli",
       "model": model,
       "reasoning": reasoning,
       "tools": bool(tools),
-      "workspace_contract": "question/structure/answer-files",
-      "answer_file": "answer.json" if structure is not None else "answer.txt",
+      "workspace_contract": "question-in-prompt + largest-created-file",
+      "answer_file": "answer.json" if structure is not None else largest_answer_path,
       "stdout": stdout[-4000:],
       "stderr": stderr[-4000:],
       "cli_output": cli_output_text[-4000:],
     }
 
     if structure is not None:
-      output_text = answer_json_text or answer_txt_text or stdout_text
+      output_text = answer_json_text or answer_txt_text or largest_answer_text or stdout_text
       try:
         return json.loads(output_text), "", meta
       except json.JSONDecodeError as e:
         raise RuntimeError(f"claude CLI returned invalid JSON: {e}: {output_text[:500]}") from e
 
-    output_text = answer_txt_text or answer_json_text or stdout_text
+    output_text = largest_answer_text or answer_txt_text or answer_json_text or stdout_text
     return output_text, "", meta
   finally:
     remove_workspace_dir(workspace_dir)

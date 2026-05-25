@@ -7,6 +7,7 @@ import uuid
 from urllib.request import Request, urlopen
 
 from . import PromptImageTagging as pit
+from .AiEngineCliWorkspace import largest_new_file, snapshot_workspace_files
 
 _IMAGE_EXTENSIONS_BY_MIME_TYPE = {
   "image/jpeg": ".jpg",
@@ -34,9 +35,8 @@ def _build_prompt(workspace_dir: str, structure: dict | None, reasoning, tools) 
   instructions = [
     "You are answering a benchmark prompt.",
     f"Work only in this directory: {workspace_dir}",
-    "Read the question from question.txt.",
+    "A copy of the benchmark question is available in question.txt.",
     "If an images directory exists, use the image files there as the prompt's attached images. The image references in question.txt point to those local files.",
-    "answer.txt or answer.json already exist and are empty.",
   ]
 
   if structure is not None:
@@ -44,12 +44,14 @@ def _build_prompt(workspace_dir: str, structure: dict | None, reasoning, tools) 
       "The required JSON schema is in structure.json. Once you're happy with the final answer, put it in answer.json"
     )
   else:
-    instructions.append("Once you've developed your answer, put it in answer.txt")
+    instructions.append("Once you've developed your answer, keep your answer in a single file.")
 
   if tools:
     instructions.append(
       "You have access to all the tools on this machine and can compile and execute code.")
 
+  instructions.append("Benchmark question:")
+  instructions.append(read_question_text(workspace_dir))
   return "\n\n".join(instructions)
 
 
@@ -135,16 +137,19 @@ def _write_prompt_workspace(prompt: str, structure: dict | None,
   else:
     question_parts.append(prompt)
 
+  question_text = "".join(question_parts).strip()
+
   paths = {
     "question": os.path.join(workspace_dir, "question.txt"),
     "answer_json": os.path.join(workspace_dir, "answer.json"),
     "answer_txt": os.path.join(workspace_dir, "answer.txt"),
     "codex_output": os.path.join(workspace_dir, "codex_output.txt"),
     "image_paths": [],
+    "question_text": question_text,
   }
 
   with open(paths["question"], "w", encoding="utf-8") as f:
-    f.write("".join(question_parts))
+    f.write(question_text)
 
   if structure is not None:
     paths["structure"] = os.path.join(workspace_dir, "structure.json")
@@ -172,6 +177,10 @@ def _read_text_file_if_exists(path: str) -> str:
     return ""
   with open(path, "r", encoding="utf-8") as f:
     return f.read().strip()
+
+
+def read_question_text(workspace_dir: str) -> str:
+  return _read_text_file_if_exists(os.path.join(workspace_dir, "question.txt"))
 
 
 def _create_codex_workspace_dir() -> str:
@@ -243,6 +252,7 @@ def _codex_ai_hook(prompt: str,
   workspace_dir = _create_codex_workspace_dir()
   try:
     workspace_paths = _write_prompt_workspace(prompt, structure, workspace_dir)
+    initial_files = snapshot_workspace_files(workspace_dir)
     prompt_input = _build_prompt(workspace_dir, structure, reasoning, tools)
 
     sandbox_mode = "workspace-write" if not tools else "danger-full-access"
@@ -298,27 +308,33 @@ def _codex_ai_hook(prompt: str,
     codex_output_text = _read_text_file_if_exists(workspace_paths["codex_output"])
     answer_json_text = _read_text_file_if_exists(workspace_paths["answer_json"])
     answer_txt_text = _read_text_file_if_exists(workspace_paths["answer_txt"])
+    largest_answer_path = largest_new_file(
+      workspace_dir,
+      initial_files,
+      exclude_paths=[str(workspace_paths["codex_output"])]
+    )
+    largest_answer_text = _read_text_file_if_exists(largest_answer_path) if largest_answer_path else ""
 
     meta = {
       "backend": "codex-cli",
       "model": model,
       "reasoning": reasoning,
       "tools": bool(tools),
-      "workspace_contract": "question/structure/answer-files",
-      "answer_file": "answer.json" if structure is not None else "answer.txt",
+      "workspace_contract": "question-in-prompt + largest-created-file",
+      "answer_file": "answer.json" if structure is not None else largest_answer_path,
       "stdout": stdout[-4000:],
       "stderr": stderr[-4000:],
       "codex_output": codex_output_text[-4000:],
     }
 
     if structure is not None:
-      output_text = answer_json_text or answer_txt_text or codex_output_text or stdout.strip()
+      output_text = answer_json_text or answer_txt_text or largest_answer_text or codex_output_text or stdout.strip()
       try:
         return json.loads(output_text), "", meta
       except json.JSONDecodeError as e:
         raise RuntimeError(f"codex returned invalid JSON: {e}: {output_text[:500]}") from e
 
-    output_text = answer_txt_text or answer_json_text or codex_output_text or stdout.strip()
+    output_text = largest_answer_text or answer_txt_text or answer_json_text or codex_output_text or stdout.strip()
     return output_text, "", meta
   finally:
     shutil.rmtree(workspace_dir, ignore_errors=True)
