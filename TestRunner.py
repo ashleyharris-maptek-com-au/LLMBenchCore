@@ -45,6 +45,7 @@ ALL_MODEL_CONFIGS = []
 
 FORCE_ARG = False
 NO_EARLY_FAIL = False
+GENERATE_SUMMARY_PNGS = True
 # Optional override for per-request API timeout (seconds)
 API_TIMEOUT_OVERRIDE: int | None = None
 
@@ -78,13 +79,13 @@ def _minify_report_if_oversized(report_path: str) -> None:
     with open(report_path, "r", encoding="utf-8", errors="ignore") as f:
       report_html = f.read()
     minified_html = minify_html.minify(report_html,
-                                   keep_closing_tags=True,
-                                   keep_html_and_head_opening_tags=True,
-                                   keep_comments=False,
-                                   minify_css=False,
-                                   minify_js=False,
-                                   remove_bangs=False,
-                                   remove_processing_instructions=False)
+                                       keep_closing_tags=True,
+                                       keep_html_and_head_opening_tags=True,
+                                       keep_comments=False,
+                                       minify_css=False,
+                                       minify_js=False,
+                                       remove_bangs=False,
+                                       remove_processing_instructions=False)
     minified_size = len(minified_html.encode("utf-8"))
     if minified_size >= original_size:
       return
@@ -92,7 +93,9 @@ def _minify_report_if_oversized(report_path: str) -> None:
     with open(temp_path, "w", encoding="utf-8", newline="") as f:
       f.write(minified_html)
     os.replace(temp_path, report_path)
-    print(f"Minified HTML report from {original_size / (1024 * 1024):.2f} MB to {minified_size / (1024 * 1024):.2f} MB: {report_path}")
+    print(
+      f"Minified HTML report from {original_size / (1024 * 1024):.2f} MB to {minified_size / (1024 * 1024):.2f} MB: {report_path}"
+    )
   except Exception as exc:
     print(f"HTML minify skipped for {report_path}: {exc}")
 
@@ -740,6 +743,9 @@ Examples:
     "--no-early-fail",
     action="store_true",
     help="Disable early-fail logic; always run all subpasses even if initial ones score low.")
+  parser.add_argument("--no-summary-pngs",
+                      action="store_true",
+                      help="Skip end-of-run summary PNG generation and landing page refresh.")
   parser.add_argument("--no-propagate-upwards",
                       action="store_true",
                       help="Disable perfect-score result propagation to higher-grade models.")
@@ -783,7 +789,7 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
       runner: The BenchmarkRunner instance
       script_file: The script file path (for --parallel mode), defaults to __file__ of caller
   """
-  global UNSKIP, IGNORE_CACHED_FAILURES, FORCE_ARG, PROPAGATE_UPWARDS
+  global UNSKIP, IGNORE_CACHED_FAILURES, FORCE_ARG, NO_EARLY_FAIL, PROPAGATE_UPWARDS, GENERATE_SUMMARY_PNGS
   import sys
 
   if script_file is None:
@@ -829,6 +835,10 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
   if args.no_early_fail:
     NO_EARLY_FAIL = True
     print("Early-fail disabled: all subpasses will be executed regardless of initial scores.")
+
+  if args.no_summary_pngs:
+    GENERATE_SUMMARY_PNGS = False
+    print("Summary PNG generation disabled for this run.")
 
   # Let runner handle custom arguments
   runner.handle_arguments(args)
@@ -918,6 +928,9 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
 
     parallel_workers = args.parallel
     cli_args = _remove_parallel_args(sys.argv[1:])
+    if "--no-summary-pngs" not in cli_args:
+      cli_args.append("--no-summary-pngs")
+      print("Parallel mode: disabling summary PNG generation in worker runs")
     print(f"Parallel mode: running up to {parallel_workers} model(s) at a time")
 
     def run_parallel_model(config: Dict[str, Any]) -> int:
@@ -1025,6 +1038,11 @@ def checkSavedPromptCache(aiEngineName: str, index: int, subPass: int, prompt: s
         saved_result = f.read()
 
       if IGNORE_CACHED_FAILURES and len(saved_result) <= 10:
+        print(
+          f"Ignoring prompt cache - IGNORE_CACHED_FAILURES is set and result was '{saved_result}'.")
+        return None
+
+      if IGNORE_CACHED_FAILURES and "__exception__" in str(saved_result):
         print(
           f"Ignoring prompt cache - IGNORE_CACHED_FAILURES is set and result was '{saved_result}'.")
         return None
@@ -1592,10 +1610,10 @@ def runAllTests(aiEngineHook: callable,
   current_model_token = rp.set_current_model(aiEngineName)
   model_config = get_model_config_by_name(aiEngineName) or {}
 
-  # Create a results file for the html results of this engines test run
-  resultFilePath = rp.model_report_path(aiEngineName) if test_filter is None else os.path.join(
-    rp.model_root(aiEngineName), "report.partial.html")
-  results_file = open(resultFilePath, "w", buffering=1, encoding="utf-8")
+  resultFilePath = rp.model_report_path(aiEngineName)
+  reportWritePath = (os.path.join(rp.model_root(aiEngineName), "report.temp.html") if test_filter
+                     is None else os.path.join(rp.model_root(aiEngineName), "report.partial.html"))
+  results_file = open(reportWritePath, "w", buffering=1, encoding="utf-8")
   results_file.write("<html>\n<head>\n<style>\n")
   results_file.write("""
 :root {
@@ -2115,7 +2133,11 @@ window.VizManager = (function() {
 
   results_file.write("</body>\n</html>\n")
   results_file.close()
-  _minify_report_if_oversized(resultFilePath)
+  _minify_report_if_oversized(reportWritePath)
+  if test_filter is None:
+    os.replace(reportWritePath, resultFilePath)
+  else:
+    resultFilePath = reportWritePath
 
   print("\n" + "=" * 60)
   print("BENCHMARK COMPLETE")
@@ -2234,6 +2256,11 @@ window.VizManager = (function() {
   if test_filter is not None:
     return
 
+  if not GENERATE_SUMMARY_PNGS:
+    print("Skipping summary PNG generation and landing page refresh for this run.")
+    rp.reset_current_model(current_model_token)
+    return
+
   # Generate a summary page of the results, suitable for use as a github landing page,
   # including a big graph of the results by engine name
 
@@ -2271,7 +2298,7 @@ window.VizManager = (function() {
   ax.set_title(_current_runner.get_benchmark_title() if _current_runner else "Benchmark Results")
   ax.invert_yaxis()  # Highest score at top
   plt.tight_layout()
-  plt.savefig("results/topLevelResults.png", dpi=600)
+  plt.savefig("results/topLevelResults.png", dpi=200)
   plt.close()
 
   print("topLevelResults.png saved")

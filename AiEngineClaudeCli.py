@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import time
+from datetime import datetime, timedelta
 
 from .AiEngineCliWorkspace import (create_workspace_dir, largest_new_file,
                                    read_text_file_if_exists, remove_workspace_dir,
@@ -81,6 +82,36 @@ def _extract_stdout_text(stdout: str) -> str:
     return text
 
 
+def _claude_rate_limit_sleep_seconds(stdout: str) -> tuple[float | None, str | None]:
+  reset_marker = "resets"
+  reset_index = stdout.find(reset_marker)
+  if reset_index < 0:
+    return None, None
+  remainder = stdout[reset_index + len(reset_marker):]
+  open_paren_index = remainder.find("(")
+  if open_paren_index < 0:
+    return None, None
+  reset_text = remainder[:open_paren_index].strip(" .·\n\r\t")
+  if not reset_text:
+    return None, None
+  normalized = " ".join(reset_text.lower().split())
+  for fmt in ("%I:%M%p", "%I%p", "%H:%M", "%H"):
+    try:
+      parsed_time = datetime.strptime(normalized, fmt).time()
+      now = datetime.now().astimezone()
+      target = now.replace(hour=parsed_time.hour,
+                           minute=parsed_time.minute,
+                           second=0,
+                           microsecond=0)
+      if target <= now:
+        target += timedelta(days=1)
+      target += timedelta(minutes=5)
+      return max(0.0, (target - now).total_seconds()), reset_text
+    except ValueError:
+      continue
+  return None, reset_text
+
+
 class ClaudeCliEngine:
 
   @staticmethod
@@ -91,7 +122,7 @@ class ClaudeCliEngine:
                model: str,
                reasoning=False,
                tools=False,
-               timeout: int = 3600,
+               timeout: int = 3600 * 3,
                emit_meta: bool = False):
     self.model = model
     self.reasoning = reasoning
@@ -173,8 +204,15 @@ def _claude_cli_ai_hook(prompt: str,
     if completed.returncode == 1 and stderr == "":
       print("Calude CLI command failed: ", command)
       if '"api_error_status":429' in stdout or "You've hit your limit" in stdout:
-        print("Rate limited, waiting 5 hours...")
-        time.sleep(3600 * 5)
+        sleep_seconds, reset_text = _claude_rate_limit_sleep_seconds(stdout)
+        if sleep_seconds is not None:
+          print(
+            f"Rate limited, waiting until 5 minutes after local reset time {reset_text} ({sleep_seconds / 60:.1f} minutes)..."
+          )
+          time.sleep(sleep_seconds)
+        else:
+          print("Rate limited, waiting 5 hours...")
+          time.sleep(3600 * 5)
         print("End of rate limited wait!")
         return None
       if "API Error: 529 Overloaded" in stdout:

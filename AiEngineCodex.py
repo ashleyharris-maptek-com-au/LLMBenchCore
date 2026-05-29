@@ -205,7 +205,7 @@ class OpenAIEngineCodex:
                model: str,
                reasoning=False,
                tools=False,
-               timeout: int = 3600,
+               timeout: int = 3600 * 3,
                max_output_tokens: int | None = None,
                temperature: float | None = None,
                emit_meta: bool = False):

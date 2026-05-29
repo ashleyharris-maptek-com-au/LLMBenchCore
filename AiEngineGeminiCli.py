@@ -243,7 +243,7 @@ def _gemini_cli_ai_hook(prompt: str,
                                cwd=workspace_dir,
                                capture_output=True,
                                text=True,
-                               timeout=timeout_override or 3600,
+                               timeout=timeout_override or 3600 * 3,
                                encoding="utf-8",
                                errors="replace",
                                env=env)

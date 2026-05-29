@@ -209,6 +209,14 @@ def _read_cache_file(cache_file: str):
         pass
       return None
 
+    if "__exception__" in str(cached_json) and IGNORE_CACHED_FAILURES:
+      print(f"IGNORE_CACHED_FAILURES set, cached result had an exception: '{cached_json}'")
+      try:
+        os.unlink(cache_file)
+      except:
+        pass
+      return None
+
     # Catch cases where some thinking was kept, but the output was empty. This occurs in many
     # engines when you run out of API credits halfway through a call, or when an answer got
     # cut-off mid thought.
