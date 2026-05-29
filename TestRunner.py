@@ -295,6 +295,24 @@ class BenchmarkRunner(ABC):
     global _current_runner
     _current_runner = self
 
+  def normalize_prompt_for_cache(self, prompt: str) -> str:
+    """
+    Return the prompt text used for cache keys and default saved-prompt comparison.
+
+    Benchmarks can override this to ignore harmless machine-specific prompt details while
+    preserving the default stripped equality semantics for everyone else.
+    """
+    return _CacheLayerModule.default_prompt_cache_key(prompt)
+
+  def cached_prompts_match(self, saved_prompt: str, current_prompt: str) -> bool:
+    """
+    Return whether a saved prompt/result pair can be reused for the current prompt.
+
+    The default matches the historical behavior: compare stripped prompt strings.
+    """
+    return self.normalize_prompt_for_cache(saved_prompt) == self.normalize_prompt_for_cache(
+      current_prompt)
+
   @abstractmethod
   def get_benchmark_title(self) -> str:
     """Return the benchmark title for reports and graphs."""
@@ -426,6 +444,25 @@ class BenchmarkRunner(ABC):
       if model_filter and config["name"] not in model_filter:
         continue
       run_model_config(config, test_filter)
+
+
+def _get_prompt_cache_key_func():
+  if _current_runner is None:
+    return _CacheLayerModule.default_prompt_cache_key
+  return _current_runner.normalize_prompt_for_cache
+
+
+def _saved_prompts_match(saved_prompt: str, current_prompt: str) -> bool:
+  if _current_runner is None:
+    return _CacheLayerModule.default_cached_prompts_match(saved_prompt, current_prompt)
+  return _current_runner.cached_prompts_match(saved_prompt, current_prompt)
+
+
+def _create_cache_layer(engine, name: str):
+  return cl(engine.configAndSettingsHash,
+            engine.AIHook,
+            name,
+            prompt_cache_key=_get_prompt_cache_key_func())
 
 
 def _config_name(model: str, reasoning, tools) -> str:
@@ -1053,8 +1090,6 @@ def checkSavedPromptCache(aiEngineName: str, index: int, subPass: int, prompt: s
     return None
 
   model_config = get_model_config_by_name(aiEngineName)
-  if model_config and not isinstance(model_config.get("engine"), str):
-    return None
 
   # Check both FORCE_ARG and the module's FORCE_REFRESH for robustness
   if FORCE_ARG or getattr(_CacheLayerModule, 'FORCE_REFRESH', False):
@@ -1066,8 +1101,7 @@ def checkSavedPromptCache(aiEngineName: str, index: int, subPass: int, prompt: s
     with open(prompt_file, "r", encoding="utf-8") as f:
       saved_prompt = f.read()
 
-    # Compare prompts (strip to handle whitespace differences)
-    if saved_prompt.strip() == str(prompt).strip():
+    if _saved_prompts_match(saved_prompt, str(prompt)):
       with open(result_file, "r", encoding="utf-8") as f:
         saved_result = f.read()
 
@@ -3000,7 +3034,7 @@ def run_model_config(config: dict, test_filter: Optional[Dict[int, Optional[Set[
       if avail is not True and avail != True:
         print(f"Skipping {name}: no backends available")
         return
-    cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
+    cacheLayer = _create_cache_layer(engine, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
     return
 
@@ -3029,7 +3063,7 @@ def run_model_config(config: dict, test_filter: Optional[Dict[int, Optional[Set[
       temperature=config.get("temperature"),
       # Runner path consumes metadata for run_summary/meta artifacts.
       emit_meta=True)
-    cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
+    cacheLayer = _create_cache_layer(engine, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
   elif engine_type in ("azure-openai", "azure_openai"):
@@ -3046,7 +3080,7 @@ def run_model_config(config: dict, test_filter: Optional[Dict[int, Optional[Set[
       temperature=config.get("temperature"),
       # Runner path consumes metadata for run_summary/meta artifacts.
       emit_meta=True)
-    cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
+    cacheLayer = _create_cache_layer(engine, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
   elif engine_type == "gemini":
@@ -3056,14 +3090,14 @@ def run_model_config(config: dict, test_filter: Optional[Dict[int, Optional[Set[
                           config["reasoning"],
                           config["tools"],
                           timeout=timeout)
-    cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
+    cacheLayer = _create_cache_layer(engine, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
   elif engine_type == "xai":
     from .AiEngineXAIGrok import GrokEngine
     timeout = config.get("timeout") or API_TIMEOUT_OVERRIDE or 3600
     engine = GrokEngine(config["base_model"], config["reasoning"], config["tools"], timeout=timeout)
-    cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
+    cacheLayer = _create_cache_layer(engine, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
   elif engine_type == "anthropic":
@@ -3073,7 +3107,7 @@ def run_model_config(config: dict, test_filter: Optional[Dict[int, Optional[Set[
                           config["reasoning"],
                           config["tools"],
                           timeout=timeout)
-    cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
+    cacheLayer = _create_cache_layer(engine, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
   elif engine_type == "bedrock":
@@ -3084,14 +3118,14 @@ def run_model_config(config: dict, test_filter: Optional[Dict[int, Optional[Set[
                            config["tools"],
                            config.get("region", "us-east-1"),
                            timeout=timeout)
-    cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
+    cacheLayer = _create_cache_layer(engine, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
   elif engine_type == "zai":
     from .AiEngineZai import ZaiEngine
     timeout = config.get("timeout") or API_TIMEOUT_OVERRIDE or 3600
     engine = ZaiEngine(config["base_model"], config["reasoning"], config["tools"], timeout=timeout)
-    cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
+    cacheLayer = _create_cache_layer(engine, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
   elif engine_type == "llamacpp":
@@ -3106,7 +3140,7 @@ def run_model_config(config: dict, test_filter: Optional[Dict[int, Optional[Set[
                             base_url,
                             timeout=timeout,
                             tools=config.get("tools", False))
-    cacheLayer = cl(engine.configAndSettingsHash, engine.AIHook, name)
+    cacheLayer = _create_cache_layer(engine, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 
 

@@ -5,6 +5,7 @@ import hashlib
 import datetime
 import time
 import random
+from typing import Callable, Optional
 
 from .ContentViolationHandler import (is_prompt_blocked, block_prompt, is_violation_response)
 
@@ -21,8 +22,30 @@ POOR_MODE = True
 # If the cache contains an empty result, ignore the cache and try again.
 IGNORE_CACHED_FAILURES = False
 
+PromptCacheKeyFunc = Callable[[str], str]
 
-def get_cache_file_path(prompt: str, structure, config_hash: str, cache_date=None) -> str:
+
+def default_prompt_cache_key(prompt: str) -> str:
+  """Default cache prompt normalization: preserve existing stripped-prompt behavior."""
+  return str(prompt).strip()
+
+
+def default_cached_prompts_match(saved_prompt: str, current_prompt: str) -> bool:
+  """Default saved-prompt comparator used when a benchmark does not customize cache matching."""
+  return default_prompt_cache_key(saved_prompt) == default_prompt_cache_key(current_prompt)
+
+
+def _cache_prompt_key(prompt: str, prompt_cache_key: Optional[PromptCacheKeyFunc] = None) -> str:
+  if prompt_cache_key is None:
+    return default_prompt_cache_key(prompt)
+  return str(prompt_cache_key(str(prompt)))
+
+
+def get_cache_file_path(prompt: str,
+                        structure,
+                        config_hash: str,
+                        cache_date=None,
+                        prompt_cache_key: Optional[PromptCacheKeyFunc] = None) -> str:
   """
   Generate the cache file path for a prompt/structure/config combination.
   This is the canonical cache path calculation used by both CacheLayer and BatchOrchestrator.
@@ -30,14 +53,19 @@ def get_cache_file_path(prompt: str, structure, config_hash: str, cache_date=Non
   if cache_date is None:
     cache_date = datetime.datetime.now()
 
-  h = (hashlib.sha256(prompt.strip().encode()).hexdigest(),
+  cache_key_prompt = _cache_prompt_key(prompt, prompt_cache_key)
+  h = (hashlib.sha256(cache_key_prompt.encode()).hexdigest(),
        hashlib.sha256(str(structure).encode()).hexdigest(), config_hash,
        cache_date.strftime("%b %Y"))
   h = hashlib.sha256(str(h).encode()).hexdigest()
   return os.path.join(tempfile.gettempdir(), "cache_" + str(h) + ".txt")
 
 
-def is_cached(prompt: str, structure, config_hash: str, force_refresh: bool = False) -> bool:
+def is_cached(prompt: str,
+              structure,
+              config_hash: str,
+              force_refresh: bool = False,
+              prompt_cache_key: Optional[PromptCacheKeyFunc] = None) -> bool:
   """
   Check if a prompt/structure/config combination is already cached.
   Respects POOR_MODE to search back in time for older cache entries.
@@ -50,7 +78,7 @@ def is_cached(prompt: str, structure, config_hash: str, force_refresh: bool = Fa
   cache_date = datetime.datetime.now()
 
   while True:
-    cache_file = get_cache_file_path(prompt, structure, config_hash, cache_date)
+    cache_file = get_cache_file_path(prompt, structure, config_hash, cache_date, prompt_cache_key)
 
     if os.path.exists(cache_file):
       # Verify the cache file has valid content
@@ -75,11 +103,18 @@ def is_cached(prompt: str, structure, config_hash: str, force_refresh: bool = Fa
   return False
 
 
-def write_to_cache(prompt: str, structure, config_hash: str, result) -> str:
+def write_to_cache(prompt: str,
+                   structure,
+                   config_hash: str,
+                   result,
+                   prompt_cache_key: Optional[PromptCacheKeyFunc] = None) -> str:
   """
   Write a result to the cache. Returns the cache file path.
   """
-  cache_file = get_cache_file_path(prompt, structure, config_hash)
+  cache_file = get_cache_file_path(prompt,
+                                   structure,
+                                   config_hash,
+                                   prompt_cache_key=prompt_cache_key)
   with open(cache_file, "w", encoding="utf-8") as f:
     json.dump(result, f)
   return cache_file
@@ -87,10 +122,15 @@ def write_to_cache(prompt: str, structure, config_hash: str, result) -> str:
 
 class CacheLayer:
 
-  def __init__(self, configAndSettingsHash, aiEngineHook, engineName: str = "Unknown"):
+  def __init__(self,
+               configAndSettingsHash,
+               aiEngineHook,
+               engineName: str = "Unknown",
+               prompt_cache_key: Optional[PromptCacheKeyFunc] = None):
     self.hash = configAndSettingsHash
     self.aiEngineHook = aiEngineHook
     self.engineName = engineName
+    self.prompt_cache_key = prompt_cache_key
     self.temp_dir = tempfile.gettempdir()
     self.failCount = 0
     # Capture force_refresh at construction time via sys.modules to get the module, not the class
@@ -110,7 +150,7 @@ class CacheLayer:
         return "", "Content violation (blocked)"
 
     # Find cache file (searches back in time if POOR_MODE)
-    cache_file = _find_cache_file(prompt, structure, self.hash)
+    cache_file = _find_cache_file(prompt, structure, self.hash, self.prompt_cache_key)
 
     if self.failCount > 3:
       if structure:
@@ -148,7 +188,7 @@ class CacheLayer:
     if not result:
       self.failCount += 1
       empty_result = {} if structure else ""
-      write_to_cache(prompt, structure, self.hash, empty_result)
+      write_to_cache(prompt, structure, self.hash, empty_result, self.prompt_cache_key)
       return empty_result, "AI didn't respond after 3 retries - failing test"
 
     print("Finished at " + str(datetime.datetime.now()))
@@ -167,16 +207,19 @@ class CacheLayer:
         # Don't cache content violations - they're permanently blocked
         return result
 
-    write_to_cache(prompt, structure, self.hash, result)
+    write_to_cache(prompt, structure, self.hash, result, self.prompt_cache_key)
     return result
 
 
-def _find_cache_file(prompt: str, structure, config_hash: str) -> str:
+def _find_cache_file(prompt: str,
+                     structure,
+                     config_hash: str,
+                     prompt_cache_key: Optional[PromptCacheKeyFunc] = None) -> str:
   """Find the cache file, searching back in time if POOR_MODE is enabled."""
   cache_date = datetime.datetime.now()
 
   while True:
-    cache_file = get_cache_file_path(prompt, structure, config_hash, cache_date)
+    cache_file = get_cache_file_path(prompt, structure, config_hash, cache_date, prompt_cache_key)
 
     if not POOR_MODE:
       break
@@ -188,7 +231,10 @@ def _find_cache_file(prompt: str, structure, config_hash: str) -> str:
 
     if cache_date < datetime.datetime(2025, 11, 30):
       # Reset to current date for writing
-      cache_file = get_cache_file_path(prompt, structure, config_hash)
+      cache_file = get_cache_file_path(prompt,
+                                       structure,
+                                       config_hash,
+                                       prompt_cache_key=prompt_cache_key)
       break
 
   return cache_file

@@ -21,7 +21,7 @@ import os
 import json
 import time
 import importlib
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Callable, Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -112,13 +112,17 @@ class BatchOrchestrator:
     "placebo": False,  # Test engine - fallback to sync
   }
 
-  def __init__(self, model_configs: List[Dict[str, Any]], force_refresh: bool = False):
+  def __init__(self,
+               model_configs: List[Dict[str, Any]],
+               force_refresh: bool = False,
+               prompt_cache_key: Optional[Callable[[str], str]] = None):
     self.model_configs = {cfg["name"]: cfg for cfg in model_configs}
     self.batch_jobs: Dict[str, BatchJob] = {}  # engine_name -> BatchJob
     self.pending_requests: Dict[str, List[BatchRequest]] = {}  # engine_name -> requests
     self.poll_interval = 300  # seconds between polls
     self.max_poll_time = 24 * 60 * 60  # 24 hours max wait
     self.force_refresh = force_refresh
+    self.prompt_cache_key = prompt_cache_key
     self.skipped_cached = 0  # Count of requests skipped due to cache
 
   @staticmethod
@@ -179,8 +183,11 @@ class BatchOrchestrator:
     Returns True if added, False if skipped due to cache hit.
     """
     # Check if already cached - skip if so
-    if CacheModule.is_cached(request.prompt, request.structure, request.config_hash,
-                             self.force_refresh):
+    if CacheModule.is_cached(request.prompt,
+                             request.structure,
+                             request.config_hash,
+                             self.force_refresh,
+                             prompt_cache_key=self.prompt_cache_key):
       self.skipped_cached += 1
       return False
 
@@ -192,8 +199,11 @@ class BatchOrchestrator:
 
   def write_result_to_cache(self, request: BatchRequest, result: Any) -> str:
     """Write a batch result to the cache file using CacheLayer."""
-    return CacheModule.write_to_cache(request.prompt, request.structure, request.config_hash,
-                                      result)
+    return CacheModule.write_to_cache(request.prompt,
+                                      request.structure,
+                                      request.config_hash,
+                                      result,
+                                      prompt_cache_key=self.prompt_cache_key)
 
   def write_result_to_prompt_cache(self,
                                    request: BatchRequest,
@@ -427,7 +437,11 @@ def run_batch_mode(runner, test_filter=None, model_filter=None, poll_interval=60
   if model_filter:
     configs = [c for c in configs if c["name"] in model_filter]
 
-  orchestrator = BatchOrchestrator(configs, force_refresh=force_mode)
+  prompt_cache_key = getattr(runner, "normalize_prompt_for_cache",
+                             CacheModule.default_prompt_cache_key)
+  orchestrator = BatchOrchestrator(configs,
+                                   force_refresh=force_mode,
+                                   prompt_cache_key=prompt_cache_key)
   orchestrator.poll_interval = poll_interval
 
   # Phase 1: Gather initial prompts (respecting earlyFail)
@@ -473,7 +487,7 @@ def run_batch_mode(runner, test_filter=None, model_filter=None, poll_interval=60
   non_batch = orchestrator.get_non_batch_requests()
   if non_batch:
     print(f"\n[Batch] Phase 3: Running {len(non_batch)} engines without batch support...")
-    run_non_batch_engines_sync(non_batch, configs)
+    run_non_batch_engines_sync(non_batch, configs, prompt_cache_key)
 
   # Phase 4: Poll batches until complete
   if submitted:
@@ -776,7 +790,8 @@ def create_engine_instance(config: Dict):
 
 
 def run_non_batch_engines_sync(requests_by_engine: Dict[str, List[BatchRequest]],
-                               configs: List[Dict]) -> None:
+                               configs: List[Dict],
+                               prompt_cache_key: Optional[Callable[[str], str]] = None) -> None:
   """Run engines without batch support synchronously."""
   from .CacheLayer import CacheLayer
 
@@ -793,7 +808,10 @@ def run_non_batch_engines_sync(requests_by_engine: Dict[str, List[BatchRequest]]
     if not engine:
       continue
 
-    cache = CacheLayer(engine.configAndSettingsHash, engine.AIHook, engine_name)
+    cache = CacheLayer(engine.configAndSettingsHash,
+                       engine.AIHook,
+                       engine_name,
+                       prompt_cache_key=prompt_cache_key)
 
     for req in requests:
       try:
@@ -817,6 +835,8 @@ def import_batch_results(batch_id_or_file: str, model_config: dict, runner) -> i
   """
   engine_name = model_config["name"]
   engine_type = model_config.get("engine", "unknown")
+  prompt_cache_key = getattr(runner, "normalize_prompt_for_cache",
+                             CacheModule.default_prompt_cache_key)
 
   print(f"\n[Import] Importing batch results for {engine_name}...")
 
@@ -925,7 +945,11 @@ def import_batch_results(batch_id_or_file: str, model_config: dict, runner) -> i
 
       # Write to cache with correct prompt and structure for proper cache key
       cache_value = (result_data, chain_of_thought)
-      CacheModule.write_to_cache(prompt, structure, config_hash, cache_value)
+      CacheModule.write_to_cache(prompt,
+                                 structure,
+                                 config_hash,
+                                 cache_value,
+                                 prompt_cache_key=prompt_cache_key)
 
       # Write to prompt/raw/cot files
       rp.ensure_global_result_dirs()

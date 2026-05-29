@@ -6,9 +6,9 @@ import subprocess
 import time
 from datetime import datetime, timedelta
 
-from .AiEngineCliWorkspace import (create_workspace_dir, largest_new_file,
-                                   read_text_file_if_exists, remove_workspace_dir,
-                                   snapshot_workspace_files, write_prompt_workspace)
+from .AiEngineCliWorkspace import (create_workspace_dir, largest_new_file, read_text_file_if_exists,
+                                   remove_workspace_dir, snapshot_workspace_files,
+                                   write_prompt_workspace)
 
 
 def _reasoning_label(reasoning) -> str:
@@ -233,16 +233,17 @@ def _claude_cli_ai_hook(prompt: str,
     largest_answer_path = largest_new_file(
       workspace_dir,
       initial_files,
-      exclude_paths=[str(workspace_paths["cli_output"])]
-    )
-    largest_answer_text = read_text_file_if_exists(largest_answer_path) if largest_answer_path else ""
+      exclude_paths=[str(workspace_paths["cli_output"])],
+      output_text="\n".join(filter(None, (stdout, stderr, cli_output_text, stdout_text))))
+    largest_answer_text = read_text_file_if_exists(
+      largest_answer_path) if largest_answer_path else ""
 
     meta = {
       "backend": "claude-cli",
       "model": model,
       "reasoning": reasoning,
       "tools": bool(tools),
-      "workspace_contract": "question-in-prompt + largest-created-file",
+      "workspace_contract": "question-in-prompt + selected-created-file",
       "answer_file": "answer.json" if structure is not None else largest_answer_path,
       "stdout": stdout[-4000:],
       "stderr": stderr[-4000:],

@@ -417,6 +417,9 @@ The benchmark framework has protections to save your wallet, which need to be ac
 - Double caching:
   - Results are cached in your temp directory and in the git repo.
   - This allows runs performed on one machine to be used by another machine to save costs.
+  - Benchmarks can override `BenchmarkRunner.normalize_prompt_for_cache()` to ignore harmless
+    prompt differences when building cache keys. Override `cached_prompts_match()` for custom
+    saved-prompt comparison. The default is stripped string equality.
 - Eternal caching:
   - Original design was for results to only be cached for a month, however the realities of API costs got in the way.
   - You can turn this off by disabling POOR_MODE in CacheLayer.py

@@ -175,7 +175,7 @@ def _write_prompt_workspace(prompt: str, structure: dict | None,
 def _read_text_file_if_exists(path: str) -> str:
   if not os.path.exists(path):
     return ""
-  with open(path, "r", encoding="utf-8") as f:
+  with open(path, "r", encoding="utf-8", errors="ignore") as f:
     return f.read().strip()
 
 
@@ -308,19 +308,20 @@ def _codex_ai_hook(prompt: str,
     codex_output_text = _read_text_file_if_exists(workspace_paths["codex_output"])
     answer_json_text = _read_text_file_if_exists(workspace_paths["answer_json"])
     answer_txt_text = _read_text_file_if_exists(workspace_paths["answer_txt"])
-    largest_answer_path = largest_new_file(
-      workspace_dir,
-      initial_files,
-      exclude_paths=[str(workspace_paths["codex_output"])]
-    )
-    largest_answer_text = _read_text_file_if_exists(largest_answer_path) if largest_answer_path else ""
+    largest_answer_path = largest_new_file(workspace_dir,
+                                           initial_files,
+                                           exclude_paths=[str(workspace_paths["codex_output"])],
+                                           output_text="\n".join(
+                                             filter(None, (stdout, stderr, codex_output_text))))
+    largest_answer_text = _read_text_file_if_exists(
+      largest_answer_path) if largest_answer_path else ""
 
     meta = {
       "backend": "codex-cli",
       "model": model,
       "reasoning": reasoning,
       "tools": bool(tools),
-      "workspace_contract": "question-in-prompt + largest-created-file",
+      "workspace_contract": "question-in-prompt + selected-created-file",
       "answer_file": "answer.json" if structure is not None else largest_answer_path,
       "stdout": stdout[-4000:],
       "stderr": stderr[-4000:],
@@ -328,13 +329,15 @@ def _codex_ai_hook(prompt: str,
     }
 
     if structure is not None:
-      output_text = answer_json_text or answer_txt_text or largest_answer_text or codex_output_text or stdout.strip()
+      output_text = answer_json_text or answer_txt_text or largest_answer_text or codex_output_text or stdout.strip(
+      )
       try:
         return json.loads(output_text), "", meta
       except json.JSONDecodeError as e:
         raise RuntimeError(f"codex returned invalid JSON: {e}: {output_text[:500]}") from e
 
-    output_text = largest_answer_text or answer_txt_text or answer_json_text or codex_output_text or stdout.strip()
+    output_text = largest_answer_text or answer_txt_text or answer_json_text or codex_output_text or stdout.strip(
+    )
     return output_text, "", meta
   finally:
     shutil.rmtree(workspace_dir, ignore_errors=True)

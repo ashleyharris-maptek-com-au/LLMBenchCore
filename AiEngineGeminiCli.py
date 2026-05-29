@@ -326,7 +326,14 @@ def _gemini_cli_ai_hook(prompt: str,
     stdout_text = _extract_stdout_text(stdout)
     largest_answer_path = largest_new_file(workspace_dir,
                                            initial_files,
-                                           exclude_paths=[str(workspace_paths["cli_output"])])
+                                           exclude_paths=[str(workspace_paths["cli_output"])],
+                                           output_text="\n".join(
+                                             filter(None, (
+                                               stdout,
+                                               stderr,
+                                               cli_output_text,
+                                               stdout_text,
+                                             ))))
     largest_answer_text = read_text_file_if_exists(
       largest_answer_path) if largest_answer_path else ""
 
@@ -337,7 +344,7 @@ def _gemini_cli_ai_hook(prompt: str,
       "settings_path": settings_path,
       "reasoning": reasoning,
       "tools": bool(tools),
-      "workspace_contract": "question-in-prompt + largest-created-file",
+      "workspace_contract": "question-in-prompt + selected-created-file",
       "answer_file": "answer.json" if structure is not None else largest_answer_path,
       "stdout": stdout[-4000:],
       "stderr": stderr[-4000:],
