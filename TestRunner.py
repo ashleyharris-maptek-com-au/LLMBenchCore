@@ -65,6 +65,7 @@ _REPORT_IMAGE_EXT_BY_MIME = {
   "image/svg+xml": ".svg",
 }
 MINIFY_REPORT_BYTES = 50 * 1024 * 1024
+_REPORT_FRAGMENT_INLINE_LIMIT_BYTES = 128 * 1024
 
 
 def _minify_report_if_oversized(report_path: str) -> None:
@@ -188,6 +189,39 @@ def _externalize_report_data_uri_images(fragment: str, aiEngineName: str) -> str
     return quote + href + quote
 
   return _REPORT_IMAGE_DATA_URI_RE.sub(replace, fragment)
+
+
+def _externalize_large_report_fragment(fragment: str, aiEngineName: str) -> tuple[str, bool]:
+  if not isinstance(fragment, str):
+    return fragment, False
+
+  fragment_bytes = fragment.encode("utf-8", errors="replace")
+  if len(fragment_bytes) <= _REPORT_FRAGMENT_INLINE_LIMIT_BYTES:
+    return fragment, False
+
+  digest = hashlib.sha256(fragment_bytes).hexdigest()
+  out_dir = os.path.join(rp.model_root(aiEngineName), "report_assets", "html")
+  os.makedirs(out_dir, exist_ok=True)
+  out_path = os.path.join(out_dir, digest[:24] + ".html")
+  if not os.path.exists(out_path):
+    with open(out_path, "w", encoding="utf-8", newline="") as f:
+      f.write(
+        "<!DOCTYPE html><html><head><meta charset='UTF-8'/><title>LLMBench Report Fragment</title>"
+        "<style>body{font-family:Arial,sans-serif;margin:12px;background:#fff;color:#111;}"
+        "img,svg,canvas{max-width:100%;height:auto;}pre{white-space:pre-wrap;word-break:break-word;}"
+        "table{max-width:100%;}details{margin:8px 0;}</style></head><body>" + fragment +
+        "</body></html>")
+
+  href = html.escape(rp.relative_path_from_model_root(out_path, aiEngineName).replace("\\", "/"),
+                     quote=True)
+  size_mb = len(fragment_bytes) / (1024 * 1024)
+  embedded = (
+    "<div style='margin:8px 0'>"
+    f"<div style='margin-bottom:8px;color:#475569;font-size:12px;'>Large report fragment moved to asset ({size_mb:.2f} MB). "
+    f"<a href='{href}'>Open standalone view</a></div>"
+    f"<iframe src='{href}' style='width:100%;height:720px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;'></iframe>"
+    "</div>")
+  return embedded, True
 
 
 def _normalize_hook_response(raw_response: Any) -> tuple[Any, str, Optional[dict]]:
@@ -2101,7 +2135,9 @@ window.VizManager = (function() {
       elif "output_nice" in subpass:
         # Nice preformatted output, if it contains table cells just display as is:
         output_nice = _externalize_report_data_uri_images(subpass["output_nice"], aiEngineName)
-        if "</td><td>" in output_nice:
+        output_nice, force_single_cell = _externalize_large_report_fragment(
+          output_nice, aiEngineName)
+        if not force_single_cell and "</td><td>" in output_nice:
           results_file.write(output_nice)
         else:
           results_file.write("    <td colspan='2'>" + output_nice + "</td>\n")
