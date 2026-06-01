@@ -11,11 +11,14 @@ import base64
 import hashlib
 import html
 import importlib
+import inspect
 import time
 import argparse
 import datetime
 import json
 import re
+import tempfile
+from pathlib import Path
 
 try:
   import minify_html
@@ -66,6 +69,282 @@ _REPORT_IMAGE_EXT_BY_MIME = {
 }
 MINIFY_REPORT_BYTES = 50 * 1024 * 1024
 _REPORT_FRAGMENT_INLINE_LIMIT_BYTES = 128 * 1024
+_SUBPASS_GRADE_CACHE_VERSION = "llmbench-subpass-grade-v2"
+_SUBPASS_GRADE_CACHE_DIR = Path(tempfile.gettempdir()) / "llmbench_subpass_grade_cache"
+_SUMMARY_PNG_CACHE_VERSION = "llmbench-summary-png-v1"
+_SUMMARY_PNG_CACHE_PATH = Path("results") / "summary_png_cache.json"
+
+
+def _stable_json_text(value) -> str:
+  try:
+    return json.dumps(value, sort_keys=True, default=str, ensure_ascii=False)
+  except Exception:
+    return repr(value)
+
+
+def _sha256_text(value: str) -> str:
+  return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _sha256_bytes(value: bytes) -> str:
+  return hashlib.sha256(value).hexdigest()
+
+
+def _is_repo_local_path(path: str) -> bool:
+  try:
+    return os.path.commonpath([_REPO_ROOT, os.path.abspath(path)]) == _REPO_ROOT
+  except Exception:
+    return False
+
+
+def _collect_callable_source_paths(value,
+                                   paths: Set[str],
+                                   seen: Set[int],
+                                   depth: int = 0) -> None:
+  if depth > 5:
+    return
+
+  value_id = id(value)
+  if value_id in seen:
+    return
+  seen.add(value_id)
+
+  if callable(value):
+    try:
+      source_path = inspect.getsourcefile(value) or inspect.getfile(value)
+    except Exception:
+      source_path = None
+    if source_path and not source_path.startswith("<") and _is_repo_local_path(source_path):
+      paths.add(os.path.abspath(source_path))
+
+    closure = getattr(value, "__closure__", None)
+    if closure:
+      for cell in closure:
+        try:
+          _collect_callable_source_paths(cell.cell_contents, paths, seen, depth + 1)
+        except ValueError:
+          pass
+
+  if isinstance(value, dict):
+    for item in value.values():
+      _collect_callable_source_paths(item, paths, seen, depth + 1)
+  elif isinstance(value, (list, tuple, set, frozenset)):
+    for item in value:
+      _collect_callable_source_paths(item, paths, seen, depth + 1)
+
+
+def _grading_source_fingerprint(index: int, test_code: str, globals_map: dict) -> str:
+  paths: Set[str] = {os.path.abspath(f"{index}.py")}
+  seen: Set[int] = set()
+  for key in (
+      "prepareSubpassPrompt",
+      "gradeAnswer",
+      "resultToNiceReport",
+      "resultToImage",
+      "getReferenceImage",
+      "getReferenceAnswer",
+      "compareImages",
+  ):
+    if key in globals_map:
+      _collect_callable_source_paths(globals_map[key], paths, seen)
+
+  records = []
+  for path in sorted(paths):
+    try:
+      with open(path, "rb") as f:
+        source_hash = _sha256_bytes(f.read())
+    except Exception:
+      source_hash = _sha256_text(test_code if os.path.abspath(path).endswith(f"{index}.py") else "")
+    try:
+      rel_path = os.path.relpath(path, _REPO_ROOT)
+    except Exception:
+      rel_path = path
+    records.append({"path": rel_path.replace("\\", "/"), "sha256": source_hash})
+
+  return _sha256_text(_stable_json_text(records))
+
+
+def _subpass_grade_cache_enabled() -> bool:
+  if FORCE_ARG or getattr(_CacheLayerModule, 'FORCE_REFRESH', False):
+    return False
+  return os.environ.get("LLMBENCH_DISABLE_GRADE_CACHE", "").strip().lower() not in {
+    "1",
+    "true",
+    "yes",
+  }
+
+
+def _subpass_grade_cache_path(index: int,
+                              subpass: int,
+                              ai_engine_name: str,
+                              grading_source_hash: str,
+                              prompt_text: str | None,
+                              result) -> Path:
+  key = _stable_json_text({
+    "version": _SUBPASS_GRADE_CACHE_VERSION,
+    "test": index,
+    "subpass": subpass,
+    "engine": ai_engine_name,
+    "grading_source_hash": grading_source_hash,
+    "prompt_hash": _sha256_text(prompt_text or ""),
+    "result_hash": _sha256_text(_stable_json_text(result)),
+  })
+  key_hash = _sha256_text(key)
+  return _SUBPASS_GRADE_CACHE_DIR / f"test_{index}" / f"{key_hash}.json"
+
+
+def _cached_subpass_artifacts_exist(subpass_data: dict) -> bool:
+  for key in ("output_image", "reference_image"):
+    value = subpass_data.get(key)
+    if isinstance(value, str) and value and not os.path.exists(value):
+      return False
+
+  additional = subpass_data.get("output_additional_images")
+  if isinstance(additional, list):
+    for value in additional:
+      if isinstance(value, str) and value and not os.path.exists(value):
+        return False
+
+  return True
+
+
+def _read_subpass_grade_cache(cache_path: Path) -> dict | None:
+  if not _subpass_grade_cache_enabled() or not cache_path.exists():
+    return None
+  try:
+    with FileLock(str(cache_path) + ".lock", timeout=30):
+      with open(cache_path, "r", encoding="utf-8") as f:
+        cached = json.load(f)
+    if not isinstance(cached, dict):
+      return None
+    subpass_data = cached.get("subpass_data")
+    if not isinstance(subpass_data, dict):
+      return None
+    if not _cached_subpass_artifacts_exist(subpass_data):
+      return None
+    return subpass_data
+  except Exception as e:
+    print(f"Failed to read subpass grade cache {cache_path}: {e}")
+    return None
+
+
+def _write_subpass_grade_cache(cache_path: Path, subpass_data: dict) -> None:
+  if not _subpass_grade_cache_enabled():
+    return
+  cache_path.parent.mkdir(parents=True, exist_ok=True)
+  cached_subpass = dict(subpass_data)
+  for volatile_key in ("startProcessingTime", "endProcessingTime", "meta", "usage"):
+    cached_subpass.pop(volatile_key, None)
+  tmp_path = cache_path.with_name(f"{cache_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+  try:
+    with FileLock(str(cache_path) + ".lock", timeout=30):
+      with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump({
+          "version": _SUBPASS_GRADE_CACHE_VERSION,
+          "subpass_data": cached_subpass,
+        }, f, ensure_ascii=False)
+      os.replace(tmp_path, cache_path)
+  except Exception as e:
+    print(f"Failed to write subpass grade cache {cache_path}: {e}")
+  finally:
+    try:
+      tmp_path.unlink(missing_ok=True)
+    except Exception:
+      pass
+
+
+def _summary_png_cache_signature(all_per_question: dict) -> str:
+  try:
+    results_text = Path("results/results.txt").read_text(encoding="utf-8")
+  except Exception:
+    results_text = ""
+  return _sha256_text(
+    _stable_json_text({
+      "version": _SUMMARY_PNG_CACHE_VERSION,
+      "results_txt": results_text,
+      "per_question": all_per_question,
+    }))
+
+
+def _summary_png_expected_files(all_per_question: dict) -> Set[str]:
+  expected = {"topLevelResults.png"}
+  for engine_data in all_per_question.values():
+    if not isinstance(engine_data, dict):
+      continue
+    for q_str, q_data in engine_data.items():
+      try:
+        q_num = int(q_str)
+      except Exception:
+        continue
+      expected.add(f"question_{q_num}.png")
+      subtasks = q_data.get("subtasks", {}) if isinstance(q_data, dict) else {}
+      if not isinstance(subtasks, dict) or not subtasks:
+        continue
+      expected.add(f"question_{q_num}_subpass_max.png")
+      expected.add(f"question_{q_num}_subpass_median.png")
+      expected.add(f"question_{q_num}_subpass_mean.png")
+      for subtask_str in subtasks.keys():
+        try:
+          subtask_num = int(subtask_str)
+        except Exception:
+          continue
+        expected.add(f"question_{q_num}_subtask_{subtask_num}.png")
+  return expected
+
+
+def _summary_png_files_exist(files: Set[str]) -> bool:
+  if not Path("results/index.html").exists():
+    return False
+  for filename in files:
+    path = Path("results") / filename
+    try:
+      if not path.exists() or path.stat().st_size <= 0:
+        return False
+    except Exception:
+      return False
+  return True
+
+
+def _read_summary_png_cache_manifest() -> dict | None:
+  try:
+    with open(_SUMMARY_PNG_CACHE_PATH, "r", encoding="utf-8") as f:
+      manifest = json.load(f)
+    return manifest if isinstance(manifest, dict) else None
+  except Exception:
+    return None
+
+
+def _summary_png_cache_hit(signature: str, expected_files: Set[str]) -> bool:
+  manifest = _read_summary_png_cache_manifest()
+  if not manifest or manifest.get("signature") != signature:
+    return False
+  manifest_files = set(str(f) for f in manifest.get("files", []))
+  if not expected_files.issubset(manifest_files):
+    return False
+  return _summary_png_files_exist(expected_files)
+
+
+def _write_summary_png_cache_manifest(signature: str, files: Set[str]) -> None:
+  tmp_path = None
+  try:
+    _SUMMARY_PNG_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = _SUMMARY_PNG_CACHE_PATH.with_name(
+      f"{_SUMMARY_PNG_CACHE_PATH.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+      json.dump({
+        "version": _SUMMARY_PNG_CACHE_VERSION,
+        "signature": signature,
+        "files": sorted(files),
+      }, f, indent=2)
+    os.replace(tmp_path, _SUMMARY_PNG_CACHE_PATH)
+  except Exception as e:
+    print(f"Failed to write summary PNG cache manifest: {e}")
+  finally:
+    if tmp_path is not None:
+      try:
+        tmp_path.unlink(missing_ok=True)
+      except Exception:
+        pass
 
 
 def _minify_report_if_oversized(report_path: str) -> None:
@@ -624,6 +903,23 @@ def get_default_model_configs() -> List[Any]:
           "reasoning": reasoning,
           "tools": tools,
         })
+
+  try:
+    from .AiEngineAntigravityCli import AntigravityCliEngine
+    if AntigravityCliEngine.Available():
+      antigravity_model = "antigravity-cli"
+      for reasoning in [0, 2, 4, 6, 9]:
+        for tools in [True, False]:
+          configs.append({
+            "name": _config_name(antigravity_model, reasoning, tools),
+            "engine": AntigravityCliEngine(antigravity_model, reasoning, tools, emit_meta=True),
+            "engine_type": "antigravity-cli",
+            "base_model": antigravity_model,
+            "reasoning": reasoning,
+            "tools": tools,
+          })
+  except ImportError:
+    pass
 
   anthropic_factories = []
   try:
@@ -1237,14 +1533,20 @@ def runTest(index: int,
     raise StopIteration
 
   t = time.time()
+  grading_source_hash = ""
+  test_code = ""
 
   try:
     with open("" + str(index) + ".py", encoding="utf-8") as f:
-      code = f.read()
-      compiled = compile(code, "" + str(index) + ".py", "exec")
+      test_code = f.read()
+      compiled = compile(test_code, "" + str(index) + ".py", "exec")
       exec(compiled, g)
+      grading_source_hash = _grading_source_fingerprint(index, test_code, g)
   except ImportError:
     print("Missing dependancy. Run 'pip install -r requirements.txt' before running!")
+  except Exception:
+    grading_source_hash = ""
+    raise
 
   if "aiEngineHook" in g:
     g["aiEngineHook"] = aiEngineHook
@@ -1260,6 +1562,7 @@ def runTest(index: int,
   model_config = get_model_config_by_name(aiEngineName) or {}
   prompt_prefix = resolve_prompt_prefix(model_config)
   subpass_meta: Dict[int, dict] = {}
+  effective_prompts: Dict[int, str] = {}
 
   if "prepareSubpassPrompt" in g:
     # get the prompt and structure from the globals:
@@ -1276,6 +1579,7 @@ def runTest(index: int,
   # Helper to run a single prompt and save results
   def run_single_prompt(idx, prompt):
     effective_prompt = apply_prompt_prefix(str(prompt), prompt_prefix)
+    effective_prompts[idx] = effective_prompt
 
     # Check saved prompt cache first (before CacheLayer)
     cached_result = checkSavedPromptCache(aiEngineName, index, idx, effective_prompt)
@@ -1342,6 +1646,35 @@ def runTest(index: int,
 
     return result
 
+  def cached_subpass_data(subPass: int, result):
+    prompt_text = effective_prompts.get(subPass)
+    cache_path = _subpass_grade_cache_path(index, subPass, aiEngineName, grading_source_hash,
+                                           prompt_text, result)
+    cached = _read_subpass_grade_cache(cache_path)
+    if cached is None:
+      return None
+
+    now = time.time()
+    subpass_data = dict(cached)
+    subpass_data["subpass"] = subPass
+    subpass_data["startProcessingTime"] = now
+    subpass_data["endProcessingTime"] = time.time()
+    if subPass in subpass_meta:
+      meta = subpass_meta[subPass]
+      subpass_data["meta"] = meta
+      usage = meta.get("usage") if isinstance(meta, dict) else None
+      if isinstance(usage, dict):
+        subpass_data["usage"] = usage
+    score = float(subpass_data.get("score", 0))
+    print(f"Subpass grade cache hit for {aiEngineName} Q{index}/S{subPass}. {cache_path}")
+    return score, subpass_data
+
+  def write_cached_subpass_data(subPass: int, result, subpass_data: dict) -> None:
+    prompt_text = effective_prompts.get(subPass)
+    cache_path = _subpass_grade_cache_path(index, subPass, aiEngineName, grading_source_hash,
+                                           prompt_text, result)
+    _write_subpass_grade_cache(cache_path, subpass_data)
+
   earlyFail = "earlyFail" in g and not NO_EARLY_FAIL
   results = [None] * len(prompts)
 
@@ -1381,6 +1714,12 @@ def runTest(index: int,
   def process_subpass(subPass, result):
     score = 0
     subpass_data = {"subpass": subPass, "score": 0, "startProcessingTime": time.time()}
+    cached = cached_subpass_data(subPass, result)
+    if cached is not None:
+      score, subpass_data = cached
+      if "extraGradeAnswerRuns" not in g:
+        propogateUpwardsHack(aiEngineName, index, subPass, score)
+      return score, subpass_data
 
     # Check for content violation - always grade as 0
     if isinstance(result, dict) and result.get("__content_violation__"):
@@ -1500,6 +1839,7 @@ def runTest(index: int,
         subpass_data["usage"] = usage
 
     subpass_data["endProcessingTime"] = time.time()
+    write_cached_subpass_data(subPass, result, subpass_data)
 
     if "extraGradeAnswerRuns" not in g:
       # HACK: Propagate perfect scores to higher-grade models from same company
@@ -1618,6 +1958,16 @@ def runTest(index: int,
         continue
 
       print(f"Running extra subpass {subPass} for grading with engine {aiEngineName}")
+      cached = cached_subpass_data(subPass, results[0])
+      if cached is not None:
+        score, subpass_data = cached
+        if score <= 0:
+          gotAZero = True
+        totalScore += score
+        subpass_results.append(subpass_data)
+        print()
+        continue
+
       subpass_data["startProcessingTime"] = time.time()
       gaResult = g["gradeAnswer"](results[0], subPass, aiEngineName)
       subpass_data["endProcessingTime"] = time.time()
@@ -1643,6 +1993,7 @@ def runTest(index: int,
         subpass_data["output_nice"] = g["resultToNiceReport"](results[0], subPass, aiEngineName)
         report_time = time.time() - report_start
         if report_time > 1: print(f"Result to nice report {subPass} took {report_time:.2f}s")
+      write_cached_subpass_data(subPass, results[0], subpass_data)
       subpass_results.append(subpass_data)
       print()
 
@@ -2331,6 +2682,18 @@ window.VizManager = (function() {
     rp.reset_current_model(current_model_token)
     return
 
+  summary_png_signature = _summary_png_cache_signature(all_per_question)
+  summary_png_expected_files = _summary_png_expected_files(all_per_question)
+  if _summary_png_cache_hit(summary_png_signature, summary_png_expected_files):
+    print("Summary PNG cache hit; skipping unchanged chart generation.")
+    rp.reset_current_model(current_model_token)
+    return
+  if _summary_png_files_exist(summary_png_expected_files):
+    _write_summary_png_cache_manifest(summary_png_signature, summary_png_expected_files)
+    print("Summary PNG cache adopted existing unchanged chart assets; skipping chart generation.")
+    rp.reset_current_model(current_model_token)
+    return
+
   # Generate a summary page of the results, suitable for use as a github landing page,
   # including a big graph of the results by engine name
 
@@ -2643,6 +3006,8 @@ window.VizManager = (function() {
     plt.savefig(f"results/{filename_mean}", dpi=100)
     plt.close()
     subpass_perf_graphs[q_num]["mean"] = filename_mean
+
+  _write_summary_png_cache_manifest(summary_png_signature, summary_png_expected_files)
 
   print("Done! Updating index.html page...")
 
@@ -3090,6 +3455,17 @@ def run_model_config(config: dict, test_filter: Optional[Dict[int, Optional[Set[
                           config["reasoning"],
                           config["tools"],
                           timeout=timeout)
+    cacheLayer = _create_cache_layer(engine, name)
+    runAllTests(cacheLayer.AIHook, name, test_filter)
+
+  elif engine_type in ("antigravity", "antigravity-cli", "antigravity_cli"):
+    from .AiEngineAntigravityCli import AntigravityCliEngine
+    timeout = config.get("timeout") or API_TIMEOUT_OVERRIDE or 3600 * 3
+    engine = AntigravityCliEngine(config["base_model"],
+                                  config.get("reasoning", False),
+                                  config.get("tools", False),
+                                  timeout=timeout,
+                                  emit_meta=True)
     cacheLayer = _create_cache_layer(engine, name)
     runAllTests(cacheLayer.AIHook, name, test_filter)
 

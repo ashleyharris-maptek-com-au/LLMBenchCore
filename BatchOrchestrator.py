@@ -109,6 +109,7 @@ class BatchOrchestrator:
     "azure_openai": False,  # No batch API - fallback to sync
     "zai": False,  # No batch API - fallback to sync
     "llamacpp": False,  # Local server - fallback to sync
+    "antigravity-cli": False,  # CLI backend - fallback to sync
     "placebo": False,  # Test engine - fallback to sync
   }
 
@@ -149,6 +150,8 @@ class BatchOrchestrator:
     if ("gemini" in descriptor or "gemma" in descriptor or
         base_model.startswith("gemini-") or base_model.startswith("gemma-")):
       return "gemini"
+    if "antigravity" in descriptor or base_model.startswith("antigravity"):
+      return "antigravity-cli"
     if ("azureopenai" in descriptor or "azure_openai" in descriptor or
         base_model.startswith("azure-")):
       return "azure_openai"
@@ -758,6 +761,10 @@ def create_engine_instance(config: Dict):
     from .AiEngineGoogleGemini import GeminiEngine
     return GeminiEngine(config["base_model"], config.get("reasoning", False),
                         config.get("tools", False))
+  elif engine_type in ("antigravity", "antigravity-cli", "antigravity_cli"):
+    from .AiEngineAntigravityCli import AntigravityCliEngine
+    return AntigravityCliEngine(config["base_model"], config.get("reasoning", False),
+                                config.get("tools", False), emit_meta=True)
   elif engine_type == "xai":
     from .AiEngineXAIGrok import GrokEngine
     return GrokEngine(config["base_model"], config.get("reasoning", False),
