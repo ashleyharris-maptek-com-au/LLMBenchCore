@@ -71,7 +71,7 @@ MINIFY_REPORT_BYTES = 50 * 1024 * 1024
 _REPORT_FRAGMENT_INLINE_LIMIT_BYTES = 128 * 1024
 _SUBPASS_GRADE_CACHE_VERSION = "llmbench-subpass-grade-v2"
 _SUBPASS_GRADE_CACHE_DIR = Path(tempfile.gettempdir()) / "llmbench_subpass_grade_cache"
-_SUMMARY_PNG_CACHE_VERSION = "llmbench-summary-png-v1"
+_SUMMARY_PNG_CACHE_VERSION = "llmbench-summary-png-v2"
 _SUMMARY_PNG_CACHE_PATH = Path("results") / "summary_png_cache.json"
 
 
@@ -253,7 +253,14 @@ def _write_subpass_grade_cache(cache_path: Path, subpass_data: dict) -> None:
       pass
 
 
-def _summary_png_cache_signature(all_per_question: dict) -> str:
+def _summary_png_tag_filename(tag: str) -> str:
+  safe_tag = "".join(c if c.isalnum() else "_" for c in tag.lower()).strip("_") or "tag"
+  tag_hash = hashlib.md5(tag.encode("utf-8")).hexdigest()[:8]
+  return f"tag_{safe_tag}_{tag_hash}.png"
+
+
+def _summary_png_cache_signature(all_per_question: dict,
+                                 question_tags: Dict[int, List[str]] | None = None) -> str:
   try:
     results_text = Path("results/results.txt").read_text(encoding="utf-8")
   except Exception:
@@ -263,14 +270,19 @@ def _summary_png_cache_signature(all_per_question: dict) -> str:
       "version": _SUMMARY_PNG_CACHE_VERSION,
       "results_txt": results_text,
       "per_question": all_per_question,
+      "question_tags": question_tags or {},
     }))
 
 
-def _summary_png_expected_files(all_per_question: dict) -> Set[str]:
+def _summary_png_expected_files(all_per_question: dict,
+                                question_tags: Dict[int, List[str]] | None = None) -> Set[str]:
   expected = {"topLevelResults.png"}
+  questions_with_subtasks: Set[int] = set()
+  questions_with_non_placebo_subtasks: Set[int] = set()
   for engine_data in all_per_question.values():
     if not isinstance(engine_data, dict):
       continue
+    engine_name = next((name for name, data in all_per_question.items() if data is engine_data), "")
     for q_str, q_data in engine_data.items():
       try:
         q_num = int(q_str)
@@ -280,15 +292,46 @@ def _summary_png_expected_files(all_per_question: dict) -> Set[str]:
       subtasks = q_data.get("subtasks", {}) if isinstance(q_data, dict) else {}
       if not isinstance(subtasks, dict) or not subtasks:
         continue
-      expected.add(f"question_{q_num}_subpass_max.png")
-      expected.add(f"question_{q_num}_subpass_median.png")
-      expected.add(f"question_{q_num}_subpass_mean.png")
+      questions_with_subtasks.add(q_num)
+      if not is_placebo_model(engine_name):
+        questions_with_non_placebo_subtasks.add(q_num)
       for subtask_str in subtasks.keys():
         try:
           subtask_num = int(subtask_str)
         except Exception:
           continue
         expected.add(f"question_{q_num}_subtask_{subtask_num}.png")
+  for q_num in questions_with_non_placebo_subtasks:
+    if q_num not in questions_with_subtasks:
+      continue
+    expected.add(f"question_{q_num}_subpass_max.png")
+    expected.add(f"question_{q_num}_subpass_median.png")
+    expected.add(f"question_{q_num}_subpass_mean.png")
+  if question_tags:
+    tag_to_questions: Dict[str, Set[int]] = {}
+    for q_num, tags in question_tags.items():
+      for tag in tags:
+        if tag not in tag_to_questions:
+          tag_to_questions[tag] = set()
+        tag_to_questions[tag].add(q_num)
+    for tag, tagged_questions in tag_to_questions.items():
+      has_nonzero_scores = False
+      for engine_data in all_per_question.values():
+        if not isinstance(engine_data, dict):
+          continue
+        tagged_score = 0.0
+        tagged_max = 0.0
+        for q_num in tagged_questions:
+          q_data = engine_data.get(str(q_num))
+          if not isinstance(q_data, dict):
+            continue
+          tagged_score += float(q_data.get("score", 0.0))
+          tagged_max += float(q_data.get("max", 0.0))
+        if tagged_max > 0 and tagged_score / tagged_max > 0:
+          has_nonzero_scores = True
+          break
+      if has_nonzero_scores:
+        expected.add(_summary_png_tag_filename(tag))
   return expected
 
 
@@ -2682,15 +2725,32 @@ window.VizManager = (function() {
     rp.reset_current_model(current_model_token)
     return
 
-  summary_png_signature = _summary_png_cache_signature(all_per_question)
-  summary_png_expected_files = _summary_png_expected_files(all_per_question)
+  all_questions = set()
+  for engine_data in all_per_question.values():
+    all_questions.update(int(q) for q in engine_data.keys())
+
+  question_tags: Dict[int, List[str]] = {}
+  for q_num in sorted(all_questions):
+    if q_num in test_tags_by_index:
+      question_tags[q_num] = list(test_tags_by_index[q_num])
+      continue
+
+    test_file = f"{q_num}.py"
+    if not os.path.exists(test_file):
+      question_tags[q_num] = []
+      continue
+
+    g = {"__file__": test_file}
+    try:
+      exec(open(test_file, encoding="utf-8").read(), g)
+      question_tags[q_num] = _extract_test_tags(g)
+    except Exception:
+      question_tags[q_num] = []
+
+  summary_png_signature = _summary_png_cache_signature(all_per_question, question_tags)
+  summary_png_expected_files = _summary_png_expected_files(all_per_question, question_tags)
   if _summary_png_cache_hit(summary_png_signature, summary_png_expected_files):
     print("Summary PNG cache hit; skipping unchanged chart generation.")
-    rp.reset_current_model(current_model_token)
-    return
-  if _summary_png_files_exist(summary_png_expected_files):
-    _write_summary_png_cache_manifest(summary_png_signature, summary_png_expected_files)
-    print("Summary PNG cache adopted existing unchanged chart assets; skipping chart generation.")
     rp.reset_current_model(current_model_token)
     return
 
@@ -2740,29 +2800,6 @@ window.VizManager = (function() {
   question_graphs = {}  # {question_num: {"title": str, "filename": str}}
 
   # Get all question numbers from all engines
-  all_questions = set()
-  for engine_data in all_per_question.values():
-    all_questions.update(int(q) for q in engine_data.keys())
-
-  # Load tags for each question (used for tag-based aggregate graphs)
-  question_tags: Dict[int, List[str]] = {}
-  for q_num in sorted(all_questions):
-    if q_num in test_tags_by_index:
-      question_tags[q_num] = list(test_tags_by_index[q_num])
-      continue
-
-    test_file = f"{q_num}.py"
-    if not os.path.exists(test_file):
-      question_tags[q_num] = []
-      continue
-
-    g = {"__file__": test_file}
-    try:
-      exec(open(test_file, encoding="utf-8").read(), g)
-      question_tags[q_num] = _extract_test_tags(g)
-    except Exception:
-      question_tags[q_num] = []
-
   for q_num in sorted(all_questions):
     q_str = str(q_num)
     # Collect scores for this question from all engines
@@ -2869,9 +2906,7 @@ window.VizManager = (function() {
     ax.invert_yaxis()
     plt.tight_layout()
 
-    safe_tag = "".join(c if c.isalnum() else "_" for c in tag.lower()).strip("_") or "tag"
-    tag_hash = hashlib.md5(tag.encode("utf-8")).hexdigest()[:8]
-    filename = f"tag_{safe_tag}_{tag_hash}.png"
+    filename = _summary_png_tag_filename(tag)
     plt.savefig(f"results/{filename}", dpi=150)
     plt.close()
 
@@ -3006,8 +3041,6 @@ window.VizManager = (function() {
     plt.savefig(f"results/{filename_mean}", dpi=100)
     plt.close()
     subpass_perf_graphs[q_num]["mean"] = filename_mean
-
-  _write_summary_png_cache_manifest(summary_png_signature, summary_png_expected_files)
 
   print("Done! Updating index.html page...")
 
@@ -3375,6 +3408,7 @@ window.VizManager = (function() {
 </html>
 """)
 
+  _write_summary_png_cache_manifest(summary_png_signature, summary_png_expected_files)
   print(f"Landing page saved to: results/index.html")
   print(f"Longest processing time: {longestProcessor[1]} seconds for test {longestProcessor[0]}")
   rp.reset_current_model(current_model_token)
