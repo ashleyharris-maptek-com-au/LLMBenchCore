@@ -66,8 +66,7 @@ class GeminiEngine:
 
   @staticmethod
   def Available():
-    if "GEMINI_API_KEY" in os.environ: return True
-    return {"env", "GEMINI_API_KEY"}
+    return False
 
   def AIHook(self, prompt: str, structure: dict | None) -> tuple:
     """Call the Gemini API with instance configuration."""

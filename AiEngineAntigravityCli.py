@@ -12,8 +12,8 @@ from pathlib import Path
 from filelock import FileLock
 
 from .AiEngineCliWorkspace import (create_workspace_dir, largest_new_file, read_text_file_if_exists,
-                                   remove_workspace_dir, snapshot_workspace_files,
-                                   write_prompt_workspace)
+                                   remove_workspace_dir, result_file_types_from_context,
+                                   snapshot_workspace_files, write_prompt_workspace)
 
 _ANTIGRAVITY_CREDENTIAL_TARGET = "gemini:antigravity"
 _ANTIGRAVITY_CREDENTIAL_USER = "antigravity"
@@ -115,24 +115,54 @@ def _settings_lock_path(app_data_dir: str) -> str:
 
 
 def _settings_lock_timeout() -> float:
-  return float(os.environ.get("ANTIGRAVITY_CLI_SETTINGS_LOCK_TIMEOUT", "-1"))
+  raw_timeout = os.environ.get("ANTIGRAVITY_CLI_SETTINGS_LOCK_TIMEOUT", "3600")
+  try:
+    timeout = float(raw_timeout)
+  except ValueError:
+    return 3600.0
+  if timeout < 0:
+    return 3600.0
+  return min(timeout, 86400.0)
+
+
+_ANTIGRAVITY_CLI_ALIAS_MODELS = {
+  "",
+  "antigravity",
+  "antigravity-cli",
+  "antigravity_cli",
+}
+_ANTIGRAVITY_CLI_MODEL_LABELS = {
+  "gemini-3.5-flash": "Gemini 3.5 Flash",
+  "gemini-3-pro": "Gemini 3 Pro",
+  "gemini-3-pro-preview": "Gemini 3 Pro",
+  "gemini-3.1-pro": "Gemini 3.1 Pro",
+  "gemini-3.1-pro-preview": "Gemini 3.1 Pro",
+}
+
+
+def _antigravity_cli_reasoning_suffix(reasoning) -> str:
+  reasoning_label = _reasoning_label(reasoning)
+  if reasoning_label in ("none", "low"):
+    return "Low"
+  if reasoning_label == "medium":
+    return "Medium"
+  return "High"
 
 
 def _antigravity_cli_model_label(model: str | None, reasoning) -> str:
   requested = str(model or "").strip()
-  if requested and requested.lower() not in {
-      "antigravity",
-      "antigravity-cli",
-      "antigravity_cli",
-  }:
-    return requested
+  requested_key = requested.lower()
+  if requested_key in _ANTIGRAVITY_CLI_ALIAS_MODELS:
+    requested_key = "gemini-3.5-flash"
+  label = _ANTIGRAVITY_CLI_MODEL_LABELS.get(requested_key)
+  if label:
+    return f"{label} ({_antigravity_cli_reasoning_suffix(reasoning)})"
+  return requested
 
-  reasoning_label = _reasoning_label(reasoning)
-  if reasoning_label in ("none", "low"):
-    return "Gemini 3.5 Flash (Low)"
-  if reasoning_label == "medium":
-    return "Gemini 3.5 Flash (Medium)"
-  return "Gemini 3.5 Flash (High)"
+
+def _antigravity_cli_supports_model(model: str | None) -> bool:
+  requested = str(model or "").strip().lower()
+  return requested in _ANTIGRAVITY_CLI_ALIAS_MODELS or requested in _ANTIGRAVITY_CLI_MODEL_LABELS
 
 
 def _load_settings(settings_path: str) -> dict:
@@ -429,14 +459,22 @@ def _quota_sleep_seconds(text: str) -> int:
     minutes = int(match.group(2) or 0)
     seconds = int(match.group(3) or 0)
     return max(1, hours * 3600 + minutes * 60 + seconds)
-  return 3600 * 5
+  return 3600 * 1
 
 
 def _looks_like_quota_exhausted(text: str) -> bool:
   lowered = text.lower()
+  if "quota available" in lowered and not any(pattern in lowered for pattern in (
+      "quota exhausted",
+      "resource_exhausted",
+      "resource exhausted",
+      "quota exceeded",
+      "exceeded your quota",
+      "quota has been exceeded",
+  )):
+    return False
   patterns = [
     "quota exhausted",
-    "model quota",
     "resource_exhausted",
     "resource exhausted",
     "rate limit",
@@ -446,19 +484,16 @@ def _looks_like_quota_exhausted(text: str) -> bool:
     "quota exceeded",
     "exceeded your quota",
     "quota has been exceeded",
-    "free quota",
-    "usage limit",
-    "daily limit",
+    "free quota exhausted",
+    "free quota exceeded",
+    "usage limit exceeded",
+    "daily limit exceeded",
     "limit reached",
   ]
   return any(pattern in lowered for pattern in patterns)
 
 
 class AntigravityCliEngine:
-
-  @staticmethod
-  def Available():
-    return _find_antigravity_cli() is not None
 
   def __init__(self,
                model: str = "antigravity-cli",
@@ -471,18 +506,22 @@ class AntigravityCliEngine:
     self.tools = tools
     self.timeout = timeout
     self.emit_meta = emit_meta
-    prompt_contract_version = "antigravity-cli-workspace-v2-settings-model"
+    prompt_contract_version = "antigravity-cli-workspace-v3-result-file-types"
     self.configAndSettingsHash = hashlib.sha256(
       (self.model + "|" + _reasoning_label(reasoning) + "|" + str(tools) + "|" +
        prompt_contract_version).encode("utf-8")).hexdigest()
 
-  def AIHook(self, prompt: str, structure: dict | None):
+  def Available(self):
+    return _find_antigravity_cli() is not None and _antigravity_cli_supports_model(self.model)
+
+  def AIHook(self, prompt: str, structure: dict | None, context: dict | None = None):
     result = _antigravity_cli_ai_hook(prompt,
                                       structure,
                                       self.model,
                                       self.reasoning,
                                       self.tools,
-                                      timeout_override=self.timeout)
+                                      timeout_override=self.timeout,
+                                      context=context)
     if not self.emit_meta and isinstance(result, tuple) and len(result) >= 2:
       return result[0], result[1]
     return result
@@ -493,7 +532,8 @@ def _antigravity_cli_ai_hook(prompt: str,
                              model: str,
                              reasoning,
                              tools,
-                             timeout_override: int | None = None):
+                             timeout_override: int | None = None,
+                             context: dict | None = None):
   antigravity_path = _find_antigravity_cli()
   if not antigravity_path:
     raise RuntimeError("Antigravity CLI is not installed or not on PATH")
@@ -548,27 +588,28 @@ def _antigravity_cli_ai_hook(prompt: str,
     with open(str(workspace_paths["cli_output"]), "w", encoding="utf-8") as f:
       f.write(cli_output_text)
 
-    combined_error_text = "\n".join(filter(None, (stdout, stderr, transcript_text, raw_transcript)))
-    if _looks_like_quota_exhausted(combined_error_text):
-      if _switch_antigravity_account():
-        return None
-      sleep_seconds = _quota_sleep_seconds(combined_error_text)
-      print(f"Antigravity quota exhausted, waiting {sleep_seconds} seconds...")
-      time.sleep(sleep_seconds)
-      return None
-
     if completed.returncode != 0:
+      combined_error_text = "\n".join(filter(None, (stdout, stderr, transcript_text, raw_transcript)))
+      if _looks_like_quota_exhausted(combined_error_text):
+        if _switch_antigravity_account():
+          return None
+        sleep_seconds = _quota_sleep_seconds(combined_error_text)
+        print(f"Antigravity quota exhausted, waiting {sleep_seconds} seconds...")
+        time.sleep(sleep_seconds)
+        return None
       print("Antigravity CLI command failed: ", command[:1] + ["--print", "<prompt>", *command[3:]])
       return "", (stderr or stdout or transcript_text or "antigravity CLI failed").strip()
 
     answer_json_text = read_text_file_if_exists(str(workspace_paths["answer_json"]))
     answer_txt_text = read_text_file_if_exists(str(workspace_paths["answer_txt"]))
     stdout_text = _extract_stdout_text(stdout)
+    result_file_types = result_file_types_from_context(context)
     largest_answer_path = largest_new_file(
       workspace_dir,
       initial_files,
       exclude_paths=[str(workspace_paths["cli_output"])],
-      output_text="\n".join(filter(None, (stdout, stderr, cli_output_text, transcript_text))))
+      output_text="\n".join(filter(None, (stdout, stderr, cli_output_text, transcript_text))),
+      result_file_types=result_file_types)
     largest_answer_text = read_text_file_if_exists(
       largest_answer_path) if largest_answer_path else ""
 
@@ -581,6 +622,7 @@ def _antigravity_cli_ai_hook(prompt: str,
       "settings_path": settings_path,
       "workspace_contract": "question-in-prompt + selected-created-file",
       "answer_file": "answer.json" if structure is not None else largest_answer_path,
+      "result_file_types": result_file_types,
       "conversation_id": conversation_id,
       "stdout": stdout[-4000:],
       "stderr": stderr[-4000:],

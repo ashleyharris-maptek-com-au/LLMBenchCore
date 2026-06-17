@@ -7,7 +7,7 @@ import uuid
 from urllib.request import Request, urlopen
 
 from . import PromptImageTagging as pit
-from .AiEngineCliWorkspace import largest_new_file, snapshot_workspace_files
+from .AiEngineCliWorkspace import largest_new_file, result_file_types_from_context, snapshot_workspace_files
 
 _IMAGE_EXTENSIONS_BY_MIME_TYPE = {
   "image/jpeg": ".jpg",
@@ -217,18 +217,19 @@ class OpenAIEngineCodex:
     self.temperature = temperature
     self.emit_meta = emit_meta
     effective_reasoning_label = _reasoning_label(reasoning)
-    prompt_contract_version = "codex-cli-v5-temp-workspace"
+    prompt_contract_version = "codex-cli-v6-result-file-types"
     self.configAndSettingsHash = hashlib.sha256(
       (model + "|" + effective_reasoning_label + "|" + str(tools) + "|" +
        prompt_contract_version).encode("utf-8")).hexdigest()
 
-  def AIHook(self, prompt: str, structure: dict | None):
+  def AIHook(self, prompt: str, structure: dict | None, context: dict | None = None):
     result = _codex_ai_hook(prompt,
                             structure,
                             self.model,
                             self.reasoning,
                             self.tools,
-                            timeout_override=self.timeout)
+                            timeout_override=self.timeout,
+                            context=context)
     if not self.emit_meta and isinstance(result, tuple) and len(result) >= 2:
       return result[0], result[1]
     return result
@@ -244,7 +245,8 @@ def _codex_ai_hook(prompt: str,
                    model: str,
                    reasoning,
                    tools,
-                   timeout_override: int | None = None):
+                   timeout_override: int | None = None,
+                   context: dict | None = None):
   codex_path = shutil_which("codex")
   if not codex_path:
     raise RuntimeError("codex CLI is not installed or not on PATH")
@@ -308,11 +310,13 @@ def _codex_ai_hook(prompt: str,
     codex_output_text = _read_text_file_if_exists(workspace_paths["codex_output"])
     answer_json_text = _read_text_file_if_exists(workspace_paths["answer_json"])
     answer_txt_text = _read_text_file_if_exists(workspace_paths["answer_txt"])
+    result_file_types = result_file_types_from_context(context)
     largest_answer_path = largest_new_file(workspace_dir,
                                            initial_files,
                                            exclude_paths=[str(workspace_paths["codex_output"])],
                                            output_text="\n".join(
-                                             filter(None, (stdout, stderr, codex_output_text))))
+                                             filter(None, (stdout, stderr, codex_output_text))),
+                                           result_file_types=result_file_types)
     largest_answer_text = _read_text_file_if_exists(
       largest_answer_path) if largest_answer_path else ""
 
@@ -323,6 +327,7 @@ def _codex_ai_hook(prompt: str,
       "tools": bool(tools),
       "workspace_contract": "question-in-prompt + selected-created-file",
       "answer_file": "answer.json" if structure is not None else largest_answer_path,
+      "result_file_types": result_file_types,
       "stdout": stdout[-4000:],
       "stderr": stderr[-4000:],
       "codex_output": codex_output_text[-4000:],

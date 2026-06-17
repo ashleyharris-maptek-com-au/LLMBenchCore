@@ -34,6 +34,7 @@ from .CacheLayer import CacheLayer as cl
 # class-attribute assignments.
 _CacheLayerModule = importlib.import_module("LLMBenchCore.CacheLayer")
 from . import ResultPaths as rp
+from .AiEngineCliWorkspace import normalize_result_file_types
 from ._prompt_utils import apply_prompt_prefix, resolve_prompt_prefix
 
 from .AiEngineMultiplexer import AiEngineMultiplexerFactory
@@ -605,6 +606,26 @@ def _extract_test_tags(test_globals: dict) -> List[str]:
   return tags
 
 
+def _extract_result_file_types(test_globals: dict) -> tuple[str, ...]:
+  for key in ("resultFileTypes", "result_file_types", "expectedResultFileTypes",
+              "expected_result_file_types"):
+    if key in test_globals:
+      return normalize_result_file_types(test_globals.get(key))
+  return ()
+
+
+def _hook_accepts_run_context(hook: callable) -> bool:
+  try:
+    signature = inspect.signature(hook)
+  except (TypeError, ValueError):
+    return False
+
+  params = list(signature.parameters.values())
+  if any(param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD) for param in params):
+    return True
+  return len(params) >= 5
+
+
 class BenchmarkRunner(ABC):
   """
   Abstract base class for benchmark runners.
@@ -915,6 +936,11 @@ def get_default_model_configs() -> List[Any]:
 
   gemini_factories = []
   try:
+    from .AiEngineAntigravityCli import AntigravityCliEngine
+    gemini_factories.append(AntigravityCliEngine)
+  except ImportError:
+    pass
+  try:
     from .AiEngineGeminiCli import GeminiCliEngine
     gemini_factories.append(GeminiCliEngine)
   except ImportError:
@@ -932,6 +958,8 @@ def get_default_model_configs() -> List[Any]:
     "gemini-2.5-flash",
     "gemini-3-flash-preview",
     "gemini-2.5-pro",
+    "gemini-3.5-flash",
+    "gemini-3-pro",
     "gemini-3-pro-preview",
     "gemini-3.1-pro-preview",
   ]
@@ -946,23 +974,6 @@ def get_default_model_configs() -> List[Any]:
           "reasoning": reasoning,
           "tools": tools,
         })
-
-  try:
-    from .AiEngineAntigravityCli import AntigravityCliEngine
-    if AntigravityCliEngine.Available():
-      antigravity_model = "antigravity-cli"
-      for reasoning in [0, 2, 4, 6, 9]:
-        for tools in [True, False]:
-          configs.append({
-            "name": _config_name(antigravity_model, reasoning, tools),
-            "engine": AntigravityCliEngine(antigravity_model, reasoning, tools, emit_meta=True),
-            "engine_type": "antigravity-cli",
-            "base_model": antigravity_model,
-            "reasoning": reasoning,
-            "tools": tools,
-          })
-  except ImportError:
-    pass
 
   anthropic_factories = []
   try:
@@ -980,6 +991,7 @@ def get_default_model_configs() -> List[Any]:
     "claude-opus-4-5": "us.anthropic.claude-opus-4-5-v1:0",
     "claude-opus-4-6": "us.anthropic.claude-opus-4-6-v1:0",
     "claude-opus-4-7": "us.anthropic.claude-opus-4-7-v1:0",
+    "claude-opus-4-8": "us.anthropic.claude-opus-4-8-v1:0",
   }
 
   def _bedrock_claude_factory(m, r, t):
@@ -991,7 +1003,7 @@ def get_default_model_configs() -> List[Any]:
 
   anthropic_base_models = [
     "claude-haiku-4-5", "claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-4-5",
-    "claude-opus-4-6", "claude-opus-4-7"
+    "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-fable-5"
   ]
   for model in anthropic_base_models:
     for reasoning in [0, 2, 4, 6, 9]:
@@ -1025,25 +1037,29 @@ def get_default_model_configs() -> List[Any]:
           "reasoning": reasoning,
           "tools": tools,
         })
-  """
+
 
   # ── Amazon Bedrock  (Qwen, Llama, Mistral, Nova) ───────────────────────
   # These are Bedrock-only models; no multiplexer needed.
   bedrock_model_groups = [
     # (display_name, bedrock_model_id, region)
-    ("qwen3-32B", "qwen.qwen3-32b-v1:0", "us-east-1"),
-    ("qwen3-VL-235B-22B", "qwen.qwen3-vl-235b-a22b", "us-east-1"),
-    ("qwen3-coder-next", "qwen.qwen3-coder-next", "us-east-1"),
-    ("llama3-70b-bedrock", "meta.llama3-70b-instruct-v1:0", "us-west-2"),
-    ("llama3-1-405b-bedrock", "meta.llama3-1-405b-instruct-v1:0", "us-west-2"),
-    ("mistral-large-bedrock", "mistral.mistral-large-2402-v1:0", "us-east-1"),
-    ("mistral-large-3-bedrock", "mistral.mistral-large-3-675b-instruct", "us-east-1"),
-    ("nova-lite", "amazon.nova-lite-v1:0", "us-east-1"),
+    ("Llama-4-Maverick-17B-Instruct", "us.meta.llama4-maverick-17b-instruct-v1:0", "us-west-2"),
+    ("Qwen3-VL-235B-A22B", "qwen.qwen3-vl-235b-a22b", "us-east-1"),
+    ("Qwen3-Coder-480B-A35B-Instruct","qwen.qwen3-coder-480b-a35b-v1:0", "us-east-1"),
+    ("Qwen3-Coder-Next", "qwen.qwen3-coder-next", "us-east-1"),
+    ("gpt-oss-120b","openai.gpt-oss-120b-1:0", "us-east-1"),
+    ("NVIDIA-Nemotron-3-Super-120B-A12B", "nvidia.nemotron-super-3-120b", "us-east-1"),
+    ("Kimi-K2.5", "moonshotai.kimi-k2.5", "us-east-1"),
+    ("Mistral-Large-3", "mistral.mistral-large-3-675b-instruct", "us-east-1"),
+    ("Devstral-2-123B", "mistral.devstral-2-123b", "us-east-1"),
+    ("MiniMax-M2.5", "minimax.minimax-m2.5", "us-east-1"),
+    ("Gemma-3-27B-PT", "google.gemma-3-27b-it", "us-east-1"),
+    ("deepseek-v3.2", "deepseek.v3.2", "us-east-1"),
     ("nova-pro", "amazon.nova-pro-v1:0", "us-east-1"),
-    ("nova-premier", "us.amazon.nova-premier-v1:0", "us-east-1"),
   ]
   for display_name, model_id, region in bedrock_model_groups:
     for reasoning, tools in [(False, False), (10, False), (10, True)]:
+      if model_id == "minimax.minimax-m2.5" and not reasoning: continue
       configs.append({
         "name": _config_name(display_name, reasoning, tools),
         "engine": "bedrock",
@@ -1051,10 +1067,8 @@ def get_default_model_configs() -> List[Any]:
         "reasoning": reasoning,
         "tools": tools,
         "region": region,
-        "env_key": "AWS_ACCESS_KEY_ID",
+        "env_keys_any": ["AWS_BEARER_TOKEN_BEDROCK", "AWS_ACCESS_KEY_ID"],
       })
-
-  """
 
   # ── Z-AI (Zhipu) models ────────────────────────────────────────────────
   zai_base_models = [
@@ -1277,7 +1291,11 @@ def run_benchmark_main(runner: BenchmarkRunner, script_file: str = None) -> None
           available = "+"
       else:
         env_key = config.get("env_key")
-        available = "+" if (env_key is None or os.environ.get(env_key)) else f"x (needs {env_key})"
+        env_keys_any = config.get("env_keys_any")
+        if env_keys_any:
+          available = "+" if any(os.environ.get(key) for key in env_keys_any) else f"x (needs {' or '.join(env_keys_any)})"
+        else:
+          available = "+" if (env_key is None or os.environ.get(env_key)) else f"x (needs {env_key})"
       print(f"  {available} {config['name']}")
     sys.exit(0)
 
@@ -1602,6 +1620,7 @@ def runTest(index: int,
 
   prompts = []
   structure = g["structure"]
+  result_file_types = _extract_result_file_types(g)
   model_config = get_model_config_by_name(aiEngineName) or {}
   prompt_prefix = resolve_prompt_prefix(model_config)
   subpass_meta: Dict[int, dict] = {}
@@ -1643,7 +1662,16 @@ def runTest(index: int,
           return cached_result
 
     try:
-      r = aiEngineHook(effective_prompt, structure, index, idx)
+      context = {
+        "test_index": index,
+        "sub_pass": idx,
+      }
+      if result_file_types:
+        context["result_file_types"] = result_file_types
+      if _hook_accepts_run_context(aiEngineHook):
+        r = aiEngineHook(effective_prompt, structure, index, idx, context)
+      else:
+        r = aiEngineHook(effective_prompt, structure, index, idx)
       if not isinstance(r, (tuple, list)):
         print("The following result from the AI engine is about to fail:")
         print(r)
@@ -2836,8 +2864,12 @@ window.VizManager = (function() {
     plt.tight_layout()
 
     filename = f"question_{q_num}.png"
-    plt.savefig(f"results/{filename}", dpi=150)
-    plt.close()
+    try:
+      plt.savefig(f"results/{filename}", dpi=150)
+      plt.close()
+    except Exception as e:
+      print(f"Failed to save {filename}: {e}")
+      continue
 
     best_engine, best_score = engine_scores[0] if engine_scores else ("", 0)
     if is_placebo_model(best_engine):
@@ -3440,6 +3472,10 @@ def run_model_config(config: dict, test_filter: Optional[Dict[int, Optional[Set[
   # ── String-based engine type (legacy path) ────────────────────────────
   # Check if required API key is available
   env_key = config.get("env_key")
+  env_keys_any = config.get("env_keys_any")
+  if env_keys_any and not any(os.environ.get(key) for key in env_keys_any):
+    print(f"Skipping {name}: {' or '.join(env_keys_any)} not set")
+    return
   if env_key and not os.environ.get(env_key):
     print(f"Skipping {name}: {env_key} not set")
     return

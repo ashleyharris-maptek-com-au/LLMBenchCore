@@ -88,6 +88,7 @@ class _WorkspaceFileCandidate:
   resolved: str
   relative: str
   name: str
+  file_type_rank: int | None
   is_binary: bool
   is_executable: bool
   is_input_like: bool
@@ -337,14 +338,70 @@ def _largest_candidate(candidates: list[_WorkspaceFileCandidate]) -> _WorkspaceF
   return max(candidates, key=lambda candidate: (candidate.size, candidate.resolved))
 
 
+def _normalize_file_type(value: object) -> str:
+  return re.sub(r"^[.]+", "", str(value).strip().lower())
+
+
+def normalize_result_file_types(value: object) -> tuple[str, ...]:
+  if value is None:
+    return ()
+  if isinstance(value, str):
+    raw_values = [value]
+  elif isinstance(value, (list, tuple, set, frozenset)):
+    raw_values = list(value)
+  else:
+    return ()
+
+  normalized = []
+  seen = set()
+  for raw_value in raw_values:
+    file_type = _normalize_file_type(raw_value)
+    if not file_type or file_type in seen:
+      continue
+    normalized.append(file_type)
+    seen.add(file_type)
+  return tuple(normalized)
+
+
+def result_file_types_from_context(context: dict | None) -> tuple[str, ...]:
+  if not isinstance(context, dict):
+    return ()
+  for key in ("result_file_types", "resultFileTypes", "expected_result_file_types",
+              "expectedResultFileTypes"):
+    if key in context:
+      return normalize_result_file_types(context.get(key))
+  return ()
+
+
+def _file_type_rank(path: Path, result_file_types: tuple[str, ...]) -> int | None:
+  if not result_file_types:
+    return None
+
+  suffix = _normalize_file_type(path.suffix)
+  name = _normalize_file_type(path.name)
+  stem = _normalize_file_type(path.stem)
+  for rank, file_type in enumerate(result_file_types):
+    if suffix == file_type or name.endswith("." + file_type) or stem == file_type:
+      return rank
+  return None
+
+
+def _best_expected_type_candidate(
+    candidates: list[_WorkspaceFileCandidate]) -> _WorkspaceFileCandidate:
+  return min(candidates, key=lambda candidate: (candidate.file_type_rank, -candidate.size,
+                                               candidate.resolved))
+
+
 def largest_new_file(workspace_dir: str,
                      previous_files: set[str],
                      exclude_paths: list[str] | None = None,
                      output_text: str = "",
-                     binary_size_cap: int = _BINARY_FALLBACK_MAX_BYTES) -> str | None:
+                     binary_size_cap: int = _BINARY_FALLBACK_MAX_BYTES,
+                     result_file_types: object = None) -> str | None:
   previous = {str(Path(path).resolve()) for path in previous_files}
   excluded = {str(Path(path).resolve()) for path in (exclude_paths or [])}
   workspace_root = Path(workspace_dir).resolve()
+  expected_file_types = normalize_result_file_types(result_file_types)
   candidates: list[_WorkspaceFileCandidate] = []
 
   for path in workspace_root.rglob("*"):
@@ -370,6 +427,7 @@ def largest_new_file(workspace_dir: str,
                               resolved=resolved,
                               relative=relative,
                               name=path.name,
+                              file_type_rank=_file_type_rank(path, expected_file_types),
                               is_binary=is_binary,
                               is_executable=is_executable,
                               is_input_like=_looks_like_input_data(workspace_root, path),
@@ -382,6 +440,20 @@ def largest_new_file(workspace_dir: str,
     candidate for candidate in candidates
     if candidate.is_mentioned and not candidate.is_input_like and not candidate.is_executable
   ]
+  expected_mentioned_text = [
+    candidate for candidate in mentioned
+    if candidate.file_type_rank is not None and not candidate.is_binary
+  ]
+  if expected_mentioned_text:
+    return _best_expected_type_candidate(expected_mentioned_text).resolved
+
+  expected_text_candidates = [
+    candidate for candidate in candidates
+    if candidate.file_type_rank is not None and not candidate.is_binary and not candidate.is_input_like
+  ]
+  if expected_text_candidates:
+    return _best_expected_type_candidate(expected_text_candidates).resolved
+
   if len(mentioned) == 1 and (not mentioned[0].is_binary
                               or mentioned[0].size <= binary_size_cap):
     return mentioned[0].resolved

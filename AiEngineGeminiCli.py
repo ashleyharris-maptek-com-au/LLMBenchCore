@@ -9,8 +9,8 @@ import random
 from typing import Any
 
 from .AiEngineCliWorkspace import (create_workspace_dir, largest_new_file, read_text_file_if_exists,
-                                   remove_workspace_dir, snapshot_workspace_files,
-                                   write_prompt_workspace)
+                                   remove_workspace_dir, result_file_types_from_context,
+                                   snapshot_workspace_files, write_prompt_workspace)
 
 
 def _reasoning_label(reasoning) -> str:
@@ -188,18 +188,19 @@ class GeminiCliEngine:
     self.tools = tools
     self.timeout = timeout
     self.emit_meta = emit_meta
-    prompt_contract_version = "gemini-cli-workspace-v1"
+    prompt_contract_version = "gemini-cli-workspace-v2-result-file-types"
     self.configAndSettingsHash = hashlib.sha256(
       (model + "|" + _reasoning_label(reasoning) + "|" + str(tools) + "|" +
        prompt_contract_version).encode("utf-8")).hexdigest()
 
-  def AIHook(self, prompt: str, structure: dict | None):
+  def AIHook(self, prompt: str, structure: dict | None, context: dict | None = None):
     result = _gemini_cli_ai_hook(prompt,
                                  structure,
                                  self.model,
                                  self.reasoning,
                                  self.tools,
-                                 timeout_override=self.timeout)
+                                 timeout_override=self.timeout,
+                                 context=context)
     if not self.emit_meta and isinstance(result, tuple) and len(result) >= 2:
       return result[0], result[1]
     return result
@@ -210,7 +211,8 @@ def _gemini_cli_ai_hook(prompt: str,
                         model: str,
                         reasoning,
                         tools,
-                        timeout_override: int | None = None):
+                        timeout_override: int | None = None,
+                        context: dict | None = None):
   gemini_path = shutil.which("gemini")
   if not gemini_path:
     raise RuntimeError("gemini CLI is not installed or not on PATH")
@@ -324,6 +326,7 @@ def _gemini_cli_ai_hook(prompt: str,
     answer_json_text = read_text_file_if_exists(str(workspace_paths["answer_json"]))
     answer_txt_text = read_text_file_if_exists(str(workspace_paths["answer_txt"]))
     stdout_text = _extract_stdout_text(stdout)
+    result_file_types = result_file_types_from_context(context)
     largest_answer_path = largest_new_file(workspace_dir,
                                            initial_files,
                                            exclude_paths=[str(workspace_paths["cli_output"])],
@@ -333,7 +336,8 @@ def _gemini_cli_ai_hook(prompt: str,
                                                stderr,
                                                cli_output_text,
                                                stdout_text,
-                                             ))))
+                                             ))),
+                                           result_file_types=result_file_types)
     largest_answer_text = read_text_file_if_exists(
       largest_answer_path) if largest_answer_path else ""
 
@@ -346,6 +350,7 @@ def _gemini_cli_ai_hook(prompt: str,
       "tools": bool(tools),
       "workspace_contract": "question-in-prompt + selected-created-file",
       "answer_file": "answer.json" if structure is not None else largest_answer_path,
+      "result_file_types": result_file_types,
       "stdout": stdout[-4000:],
       "stderr": stderr[-4000:],
       "cli_output": cli_output_text[-4000:],

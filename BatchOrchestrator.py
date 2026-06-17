@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from . import ResultPaths as rp
+from .AiEngineCliWorkspace import normalize_result_file_types
 from ._prompt_utils import apply_prompt_prefix, resolve_prompt_prefix
 
 # Import CacheLayer as a module (avoid package attribute that may resolve to the class)
@@ -51,6 +52,7 @@ class BatchRequest:
   sub_pass: int
   engine_name: str
   config_hash: str  # For cache key generation
+  result_file_types: Tuple[str, ...] = field(default_factory=tuple)
   is_early_fail_check: bool = False  # True if this is an earlyFail initial request
 
 
@@ -86,6 +88,14 @@ class EarlyFailTestInfo:
   all_prompts: List[str]
   initial_count: int
   threshold: float
+
+
+def _extract_result_file_types(test_globals: dict) -> Tuple[str, ...]:
+  for key in ("resultFileTypes", "result_file_types", "expectedResultFileTypes",
+              "expected_result_file_types"):
+    if key in test_globals:
+      return normalize_result_file_types(test_globals.get(key))
+  return ()
 
 
 class BatchOrchestrator:
@@ -575,6 +585,7 @@ def gather_all_prompts(orchestrator: BatchOrchestrator,
 
     # Get prompts
     structure = g.get("structure")
+    result_file_types = _extract_result_file_types(g)
     prompts = []
 
     if "prepareSubpassPrompt" in g:
@@ -627,6 +638,7 @@ def gather_all_prompts(orchestrator: BatchOrchestrator,
                                sub_pass=sub_pass,
                                engine_name=engine_name,
                                config_hash=config_hash,
+                               result_file_types=result_file_types,
                                is_early_fail_check=early_fail and sub_pass < early_fail_count)
         if orchestrator.add_request(request):
           total_prompts += 1
@@ -654,6 +666,7 @@ def handle_early_fail_follow_ups(orchestrator: BatchOrchestrator,
     initial_count = ef_test.initial_count
     threshold = ef_test.threshold
     structure = g.get("structure")
+    result_file_types = _extract_result_file_types(g)
 
     print(f"[Batch] Grading earlyFail test {test_index}...")
 
@@ -722,6 +735,7 @@ def handle_early_fail_follow_ups(orchestrator: BatchOrchestrator,
                                    sub_pass=sub_pass,
                                    engine_name=engine_name,
                                    config_hash=config_hash,
+                                   result_file_types=result_file_types,
                                    is_early_fail_check=False)
             orchestrator.add_request(request)
             follow_up_count += 1
@@ -822,7 +836,13 @@ def run_non_batch_engines_sync(requests_by_engine: Dict[str, List[BatchRequest]]
 
     for req in requests:
       try:
-        result = cache.AIHook(req.prompt, req.structure, req.test_index, req.sub_pass)
+        context = {
+          "test_index": req.test_index,
+          "sub_pass": req.sub_pass,
+        }
+        if req.result_file_types:
+          context["result_file_types"] = req.result_file_types
+        result = cache.AIHook(req.prompt, req.structure, req.test_index, req.sub_pass, context)
         print(f"[Batch] Completed {req.custom_id}")
       except Exception as e:
         print(f"[Batch] Error on {req.custom_id}: {e}")

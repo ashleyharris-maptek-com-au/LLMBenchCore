@@ -5,9 +5,11 @@ import hashlib
 import datetime
 import time
 import random
+import inspect
 from typing import Callable, Optional
 
 from .ContentViolationHandler import (is_prompt_blocked, block_prompt, is_violation_response)
+from .AiEngineCliWorkspace import result_file_types_from_context
 
 # Global flag to bypass cache reading (still writes to cache)
 FORCE_REFRESH = False
@@ -39,6 +41,28 @@ def _cache_prompt_key(prompt: str, prompt_cache_key: Optional[PromptCacheKeyFunc
   if prompt_cache_key is None:
     return default_prompt_cache_key(prompt)
   return str(prompt_cache_key(str(prompt)))
+
+
+def _hook_accepts_context(hook: Callable[..., object]) -> bool:
+  try:
+    signature = inspect.signature(hook)
+  except (TypeError, ValueError):
+    return False
+
+  params = list(signature.parameters.values())
+  if any(param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD) for param in params):
+    return True
+  return len(params) >= 3
+
+
+def _structure_cache_key_with_context(structure, context: dict | None):
+  result_file_types = result_file_types_from_context(context)
+  if not result_file_types:
+    return structure
+  return {
+    "__llmbench_structure": structure,
+    "__llmbench_result_file_types": result_file_types,
+  }
 
 
 def get_cache_file_path(prompt: str,
@@ -133,11 +157,17 @@ class CacheLayer:
     self.prompt_cache_key = prompt_cache_key
     self.temp_dir = tempfile.gettempdir()
     self.failCount = 0
+    self.aiEngineHookSupportsContext = _hook_accepts_context(aiEngineHook)
     # Capture force_refresh at construction time via sys.modules to get the module, not the class
     import sys
     self.force_refresh = sys.modules[__name__].FORCE_REFRESH
 
-  def AIHook(self, prompt: str, structure, index, subPass):
+  def _call_ai_engine(self, prompt: str, structure, context: dict | None):
+    if self.aiEngineHookSupportsContext:
+      return self.aiEngineHook(prompt, structure, context)
+    return self.aiEngineHook(prompt, structure)
+
+  def AIHook(self, prompt: str, structure, index, subPass, context: dict | None = None):
     # Check if this prompt is permanently blocked due to content violation
     if is_prompt_blocked(self.engineName, index, subPass, prompt):
       print(f"BLOCKED: Prompt for {self.engineName} Q{index}/S{subPass} is permanently blocked")
@@ -150,7 +180,11 @@ class CacheLayer:
         return "", "Content violation (blocked)"
 
     # Find cache file (searches back in time if POOR_MODE)
-    cache_file = _find_cache_file(prompt, structure, self.hash, self.prompt_cache_key)
+    cache_structure = (
+      _structure_cache_key_with_context(structure, context)
+      if self.aiEngineHookSupportsContext else structure)
+
+    cache_file = _find_cache_file(prompt, cache_structure, self.hash, self.prompt_cache_key)
 
     if self.failCount > 3:
       if structure:
@@ -171,24 +205,24 @@ class CacheLayer:
       return {}, ""
 
     print("Started at " + str(datetime.datetime.now()))
-    result = self.aiEngineHook(prompt, structure)
+    result = self._call_ai_engine(prompt, structure, context)
 
     if not result and self.aiEngineHook.__name__ != "PlaceboAIHook":
       print("Empty result or Error 500, pausing and then retrying in a few minutes...")
       time.sleep(60 + random.randint(0, 120))
-      result = self.aiEngineHook(prompt, structure)
+      result = self._call_ai_engine(prompt, structure, context)
 
       if not result:
         print(
           "Empty result or Error 500, pausing for a VERY LONG TIME and then retrying in a few minutes..."
         )
         time.sleep(600 + random.randint(0, 1200))
-        result = self.aiEngineHook(prompt, structure)
+        result = self._call_ai_engine(prompt, structure, context)
 
     if not result:
       self.failCount += 1
       empty_result = {} if structure else ""
-      write_to_cache(prompt, structure, self.hash, empty_result, self.prompt_cache_key)
+      write_to_cache(prompt, cache_structure, self.hash, empty_result, self.prompt_cache_key)
       return empty_result, "AI didn't respond after 3 retries - failing test"
 
     print("Finished at " + str(datetime.datetime.now()))
@@ -207,7 +241,7 @@ class CacheLayer:
         # Don't cache content violations - they're permanently blocked
         return result
 
-    write_to_cache(prompt, structure, self.hash, result, self.prompt_cache_key)
+    write_to_cache(prompt, cache_structure, self.hash, result, self.prompt_cache_key)
     return result
 
 

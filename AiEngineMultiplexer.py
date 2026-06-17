@@ -1,5 +1,25 @@
 import hashlib
+import inspect
 from typing import Any, Callable
+
+
+def _hook_accepts_context(hook: Callable[..., Any]) -> bool:
+  try:
+    signature = inspect.signature(hook)
+  except (TypeError, ValueError):
+    return False
+
+  params = list(signature.parameters.values())
+  if any(param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD) for param in params):
+    return True
+  return len(params) >= 3
+
+
+def _call_ai_hook(engine: Any, prompt: str, structure: dict | None, context: dict | None):
+  hook = engine.AIHook
+  if _hook_accepts_context(hook):
+    return hook(prompt, structure, context)
+  return hook(prompt, structure)
 
 
 class AiEngineMultiplexer:
@@ -71,15 +91,15 @@ class AiEngineMultiplexer:
 
     raise RuntimeError(f"No available backend for model '{self.model}'")
 
-  def AIHook(self, prompt: str, structure: dict | None):
+  def AIHook(self, prompt: str, structure: dict | None, context: dict | None = None):
     engine = self._select_engine()
     try:
-      return engine.AIHook(prompt, structure)
+      return _call_ai_hook(engine, prompt, structure, context)
     except LookupError:
       self._engines.remove(engine)
       self._selected_engine = None
       print(f"MULTIPLEXER: Falling back from {engine.__class__.__name__} to next available backend")
-      return self.AIHook(prompt, structure)
+      return self.AIHook(prompt, structure, context)
 
 
 class AiEngineMultiplexerFactory:

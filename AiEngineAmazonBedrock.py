@@ -18,12 +18,31 @@ Get access from: https://console.aws.amazon.com/bedrock/
 The Bedrock documentation: https://docs.aws.amazon.com/bedrock/latest/userguide/
 """
 
+import base64
 import hashlib
 import os
 import json
+import urllib.parse
 from . import PromptImageTagging as pit
 from typing import Any, List, Optional
 from pydantic import BaseModel, create_model
+
+
+def _bedrock_bearer_token_region(token: str | None) -> str | None:
+  if not token:
+    return None
+  payload = token.removeprefix("bedrock-api-key-")
+  try:
+    decoded = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)).decode(
+      "utf-8", errors="replace")
+  except Exception:
+    return None
+  credential = urllib.parse.parse_qs(urllib.parse.urlsplit(decoded).query).get(
+    "X-Amz-Credential", [""])[0]
+  parts = credential.split("/")
+  if len(parts) >= 4 and parts[2]:
+    return parts[2]
+  return None
 
 
 class BedrockEngine:
@@ -46,9 +65,9 @@ class BedrockEngine:
 
   @staticmethod
   def Available():
-    if os.environ.get("AWS_ACCESS_KEY_ID"):
+    if os.environ.get("AWS_BEARER_TOKEN_BEDROCK") or os.environ.get("AWS_ACCESS_KEY_ID"):
       return True
-    return {"env", "AWS_ACCESS_KEY_ID"}
+    return {"env", "AWS_BEARER_TOKEN_BEDROCK or AWS_ACCESS_KEY_ID"}
 
   def __init__(self,
                model: str,
@@ -70,7 +89,6 @@ class BedrockEngine:
 
   def AIHook(self, prompt: str, structure: dict | None) -> tuple:
     """Call the Bedrock API with instance configuration."""
-    assert False, "Can't run here - we're trying to get this working in claude code CLI."
 
     return _bedrock_ai_hook(prompt,
                             structure,
@@ -310,9 +328,16 @@ def _bedrock_ai_hook(prompt: str,
   from botocore.config import Config
 
   try:
-    # Initialize the Bedrock runtime client with timeout config
-    boto_config = Config(read_timeout=timeout_override or 3600, connect_timeout=30)
-    client = boto3.client(service_name='bedrock-runtime', region_name=region, config=boto_config)
+    bearer_token = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
+    client_region = _bedrock_bearer_token_region(bearer_token) or region
+    config_kwargs = {
+      "read_timeout": timeout_override or 3600,
+      "connect_timeout": 30,
+    }
+    if bearer_token:
+      config_kwargs["auth_scheme_preference"] = "httpBearerAuth,sigv4"
+    boto_config = Config(**config_kwargs)
+    client = boto3.client(service_name='bedrock-runtime', region_name=client_region, config=boto_config)
 
     # Build content blocks
     content_blocks = build_bedrock_content(prompt)
@@ -321,12 +346,12 @@ def _bedrock_ai_hook(prompt: str,
     messages = [{"role": "user", "content": content_blocks}]
 
     # Build inference config
-    inference_config = {"temperature": 0.7, "maxTokens": 8192}
+    inference_config = {"temperature": 0.7, "maxTokens": 128*1024}
 
-    if model in ["meta.llama3-70b-instruct-v1:0", "meta.llama3-1-405b-instruct-v1:0"]:
-      inference_config["maxTokens"] = 2048
-    elif "nova" in model.lower():
-      inference_config["maxTokens"] = 10000
+    if "gpt-oss-120b" in model: 
+      inference_config["maxTokens"] = 120000
+    if "llama4-maverick" in model:
+      inference_config["maxTokens"] = 8190
 
     # Additional model-specific fields
     additional_fields = {}
@@ -591,6 +616,10 @@ def _bedrock_ai_hook(prompt: str,
   except ClientError as err:
     error_message = err.response['Error']['Message']
     print(f"AWS Bedrock client error: {error_message}")
+    print("Model: + " + model)
+
+    if "The system encountered an unexpected error during processing. Try your request again." in error_message:
+      return None
 
     # Check for content policy violation
     from .ContentViolationHandler import is_content_violation_bedrock
